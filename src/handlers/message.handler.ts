@@ -1,4 +1,11 @@
 import { Context } from "../context/Context";
+import { CommandPipeline } from "../commands/CommandPipeline";
+
+let pipeline: CommandPipeline | undefined;
+
+export function setCommandPipeline(p: CommandPipeline): void {
+  pipeline = p;
+}
 
 export async function handleMessage(ctx: Context): Promise<void> {
   if (ctx.message.isPostback) {
@@ -18,7 +25,10 @@ export async function handleMessage(ctx: Context): Promise<void> {
 }
 
 async function handleText(ctx: Context): Promise<void> {
-  await ctx.typingOn();
+  if (pipeline) {
+    await pipeline.run(ctx);
+    return;
+  }
   await ctx.reply(`استقبلت: ${ctx.message.text}`);
 }
 
