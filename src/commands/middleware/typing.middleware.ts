@@ -1,10 +1,6 @@
-import { PipelineMiddleware } from "../types/ICommand";
+import { MiddlewareFn } from "../../middleware/types/IMiddleware";
 
-export const typingMiddleware: PipelineMiddleware = async (
-  ctx,
-  _command,
-  next
-) => {
+export const typingMiddleware: MiddlewareFn = async (ctx, _command, next) => {
   await ctx.typingOn();
   await next();
 };
