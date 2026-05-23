@@ -1,22 +1,24 @@
 import { Context } from "../context/Context";
-import { ICommand, PipelineMiddleware } from "./types/ICommand";
 import { CommandRegistry } from "./CommandRegistry";
+import { MiddlewareChain } from "../middleware/MiddlewareChain";
+import { IMiddleware, MiddlewareFn } from "../middleware/types/IMiddleware";
 
 export type NotFoundHandler = (ctx: Context) => Promise<void>;
 
 export class CommandPipeline {
   private readonly registry: CommandRegistry;
-  private readonly middlewares: PipelineMiddleware[] = [];
+  private readonly chain: MiddlewareChain;
   private readonly prefix: string;
   private notFoundHandler?: NotFoundHandler;
 
   constructor(registry: CommandRegistry, prefix = "") {
     this.registry = registry;
+    this.chain = new MiddlewareChain();
     this.prefix = prefix;
   }
 
-  use(middleware: PipelineMiddleware): this {
-    this.middlewares.push(middleware);
+  use(middleware: MiddlewareFn | IMiddleware): this {
+    this.chain.use(middleware);
     return this;
   }
 
@@ -38,28 +40,12 @@ export class CommandPipeline {
     const command = this.registry.resolve(rawName);
 
     if (!command) {
-      if (this.notFoundHandler) {
-        await this.notFoundHandler(ctx);
-      }
+      await this.notFoundHandler?.(ctx);
       return;
     }
 
-    await this.executeChain(ctx, command, 0);
-  }
-
-  private async executeChain(
-    ctx: Context,
-    command: ICommand,
-    index: number
-  ): Promise<void> {
-    if (index >= this.middlewares.length) {
-      await command.execute(ctx);
-      return;
-    }
-
-    const middleware = this.middlewares[index]!;
-    await middleware(ctx, command, () =>
-      this.executeChain(ctx, command, index + 1)
-    );
+    await this.chain.execute(ctx, command, async (_ctx, cmd) => {
+      await cmd!.execute(_ctx);
+    });
   }
 }
