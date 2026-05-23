@@ -8,12 +8,6 @@ export interface ICommand {
   execute(ctx: Context): Promise<void>;
 }
 
-export type PipelineMiddleware = (
-  ctx: Context,
-  command: ICommand,
-  next: () => Promise<void>
-) => Promise<void>;
-
 export function isValidCommand(obj: unknown): obj is ICommand {
   return (
     typeof obj === "object" &&
