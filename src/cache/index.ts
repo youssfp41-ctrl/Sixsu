@@ -5,6 +5,7 @@ export { CacheStore } from "./CacheStore";
 
 export { MemoryProvider } from "./providers/MemoryProvider";
 export { RedisProvider } from "./providers/RedisProvider";
+export { createCacheProvider } from "./providers/createProvider";
 
 export type {
   ICacheProvider,
