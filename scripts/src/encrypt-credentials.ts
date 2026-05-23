@@ -14,7 +14,7 @@
 
 import fs   from "fs";
 import path from "path";
-import { CryptoHelper } from "../../sixsu-sec/src/facebook/auth/CryptoHelper";
+import { CryptoHelper } from "../../src/facebook/auth/CryptoHelper";
 
 async function main(): Promise<void> {
   const args  = process.argv.slice(2);
