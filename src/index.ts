@@ -29,6 +29,7 @@ import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middlew
 import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
+import { CacheManager } from "./cache/CacheManager";
 import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
 import { setCommandPipeline } from "./handlers/message.handler";
 
@@ -41,6 +42,9 @@ async function bootstrap(): Promise<void> {
     await bot.stop();
   });
   bot.register(errorHandler);
+
+  const cache = new CacheManager();
+  bot.register(cache);
 
   const db = new DatabaseManager();
   bot.register(db);
