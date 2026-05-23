@@ -35,6 +35,11 @@ export const config = {
       .filter(Boolean),
   },
 
+  plugins: {
+    dir:   optionalEnv("PLUGINS_DIR", "src/plugins/definitions"),
+    watch: process.env["PLUGINS_WATCH"] !== "false",
+  },
+
   database: {
     mongoUri: optionalEnv("MONGODB_URI", ""),
   },
