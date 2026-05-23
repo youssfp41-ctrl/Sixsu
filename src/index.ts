@@ -1,3 +1,4 @@
+import path from "path";
 import { config } from "./config/env";
 import { createApp } from "./app";
 import { Bot } from "./core/Bot";
@@ -6,6 +7,12 @@ import { FacebookClient } from "./facebook/FacebookClient";
 import { FacebookSender } from "./facebook/FacebookSender";
 import { FacebookEventNormalizer } from "./facebook/FacebookEventNormalizer";
 import { FacebookGateway } from "./facebook/FacebookGateway";
+import { CommandRegistry } from "./commands/CommandRegistry";
+import { CommandLoader } from "./commands/CommandLoader";
+import { CommandPipeline } from "./commands/CommandPipeline";
+import { loggingMiddleware } from "./commands/middleware/logging.middleware";
+import { typingMiddleware } from "./commands/middleware/typing.middleware";
+import { setCommandPipeline } from "./handlers/message.handler";
 
 async function bootstrap(): Promise<void> {
   const bot = new Bot();
@@ -17,6 +24,22 @@ async function bootstrap(): Promise<void> {
   const gateway = new FacebookGateway(connection, sender, normalizer);
 
   connection.connect();
+
+  const registry = new CommandRegistry();
+  const loader = new CommandLoader(registry);
+  const commandsDir = path.resolve(config.bot.commandsDir);
+
+  await loader.load(commandsDir);
+  loader.watch(commandsDir);
+
+  const pipeline = new CommandPipeline(registry, config.bot.prefix)
+    .use(loggingMiddleware)
+    .use(typingMiddleware)
+    .onNotFound(async (ctx) => {
+      await ctx.reply(`❓ الأمر "${ctx.commandName}" غير موجود.`);
+    });
+
+  setCommandPipeline(pipeline);
 
   const app = createApp(gateway);
 
