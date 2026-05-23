@@ -1,5 +1,17 @@
 import path from "path";
 import { config } from "./config/env";
+import { LoggerManager } from "./logger/LoggerManager";
+import { LogLevel } from "./logger/types/ILogger";
+
+LoggerManager.configure({
+  level:         config.logger.level as LogLevel,
+  logDir:        config.logger.dir,
+  enableFile:    config.logger.enableFile,
+  enableConsole: true,
+});
+
+const log = LoggerManager.getLogger("Boot");
+
 import { createApp } from "./app";
 import { Bot } from "./core/Bot";
 import { FacebookConnection } from "./facebook/FacebookConnection";
@@ -26,15 +38,15 @@ async function bootstrap(): Promise<void> {
   bot.register(db);
 
   const connection = new FacebookConnection();
-  const client = new FacebookClient(connection);
-  const sender = new FacebookSender(client);
+  const client     = new FacebookClient(connection);
+  const sender     = new FacebookSender(client);
   const normalizer = new FacebookEventNormalizer();
-  const gateway = new FacebookGateway(connection, sender, normalizer);
+  const gateway    = new FacebookGateway(connection, sender, normalizer);
 
   connection.connect();
 
-  const registry = new CommandRegistry();
-  const loader = new CommandLoader(registry);
+  const registry    = new CommandRegistry();
+  const loader      = new CommandLoader(registry);
   const commandsDir = path.resolve(config.bot.commandsDir);
 
   await loader.load(commandsDir);
@@ -62,12 +74,12 @@ async function bootstrap(): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(config.port, () => {
-      console.log(`[Boot] Server on port ${config.port} [${config.nodeEnv}]`);
+      log.info(`Server listening on port ${config.port}`, { env: config.nodeEnv });
       resolve();
     });
 
     server.on("error", (err: Error) => {
-      console.error("[Boot] Failed to start server:", err.message);
+      log.error("Failed to start server.", err);
       reject(err);
     });
   });
@@ -76,6 +88,6 @@ async function bootstrap(): Promise<void> {
 }
 
 bootstrap().catch((err: unknown) => {
-  console.error("[Boot] Fatal error during startup:", err);
+  log.error("Fatal error during startup.", err);
   process.exit(1);
 });
