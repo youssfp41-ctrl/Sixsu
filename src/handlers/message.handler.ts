@@ -1,16 +1,6 @@
-import { MessagingEntry } from "../types";
-import { messengerService } from "../services/messenger.service";
-import { ContextBuilder } from "../context/ContextBuilder";
 import { Context } from "../context/Context";
 
-const contextBuilder = new ContextBuilder(messengerService);
-
-export async function handleMessage(event: MessagingEntry): Promise<void> {
-  const ctx = contextBuilder.build(event);
-  await dispatch(ctx);
-}
-
-async function dispatch(ctx: Context): Promise<void> {
+export async function handleMessage(ctx: Context): Promise<void> {
   if (ctx.message.isPostback) {
     await handlePostback(ctx);
     return;
