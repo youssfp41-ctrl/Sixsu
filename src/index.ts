@@ -34,11 +34,59 @@ import { TaskScheduler } from "./scheduler";
 import { AuthManager }      from "./facebook/auth/AuthManager";
 import { SessionManager }   from "./facebook/session/SessionManager";
 import { SessionStore }     from "./facebook/session/SessionStore";
-import { ReconnectManager } from "./facebook/reconnect/ReconnectManager";
-import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
+import { ReconnectManager }    from "./facebook/reconnect/ReconnectManager";
+import { ProcessErrorHandler }  from "./errors/handlers/ProcessErrorHandler";
 import { setCommandPipeline, setTaskScheduler } from "./handlers/message.handler";
+import {
+  CredentialManager,
+  EnvLoader,
+  EncryptedFileLoader,
+  StartupValidator,
+  EnvPresenceCheck,
+  CredentialLoadCheck,
+  SessionIntegrityCheck,
+  CheckSeverity,
+} from "./security";
 
 async function bootstrap(): Promise<void> {
+  // ─── Security: Startup Validation ────────────────────────────────────────
+  const credManager = new CredentialManager({
+    loaders: [
+      new EnvLoader({
+        required: ["FB_PAGE_ACCESS_TOKEN", "FB_APP_SECRET", "FB_VERIFY_TOKEN"],
+        optional: ["SESSION_SECRET"],
+      }),
+      ...(config.auth.appStateFile
+        ? [new EncryptedFileLoader({
+            filePath:      config.auth.appStateFile,
+            encryptionKey: config.auth.sessionSecret,
+          })]
+        : []),
+    ],
+  });
+
+  const validator = new StartupValidator()
+    .add(new EnvPresenceCheck({
+      required:  ["FB_PAGE_ACCESS_TOKEN", "FB_APP_SECRET", "FB_VERIFY_TOKEN", "SESSION_SECRET"],
+      severity:  CheckSeverity.CRITICAL,
+    }))
+    .add(new CredentialLoadCheck(credManager))
+    .add(new SessionIntegrityCheck({
+      sessionFilePath: config.auth.sessionFile,
+      severity:        CheckSeverity.WARNING,
+    }));
+
+  const report = await validator.validate();
+
+  if (!report.passed) {
+    log.error(
+      `Startup aborted — ${report.criticalFailed.length} critical check(s) failed: ` +
+      `[${report.criticalFailed.join(", ")}]`
+    );
+    process.exit(1);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   const bot = new Bot();
 
   const errorHandler = new ProcessErrorHandler();
