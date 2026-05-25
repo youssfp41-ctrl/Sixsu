@@ -122,6 +122,14 @@ export class SessionManager implements ISystem {
     log.info(`Sessions restored: ${restored}/${accounts.length}`);
   }
 
+  /**
+   * Attempt a re-login for a specific account via the registered AuthManager
+   * provider, then persist the refreshed session.
+   *
+   * This method is intentionally kept internal to SessionManager.
+   * For production reconnect flows with retry/backoff, callers should use
+   * ReconnectManager.reconnect() instead of calling this directly.
+   */
   async reconnect(accountId: string): Promise<boolean> {
     log.info(`Reconnecting account: ${accountId}`);
 
@@ -199,12 +207,20 @@ export class SessionManager implements ISystem {
 
   private async handleInvalidSession(
     accountId: string,
-    entry: SessionEntry,
-    status: SessionStatus
+    entry:     SessionEntry,
+    status:    SessionStatus
   ): Promise<void> {
     if (status === SessionStatus.EXPIRED) {
-      log.info(`Session for "${accountId}" expired. Attempting reconnect via provider.`);
-      await this.reconnect(accountId);
+      /**
+       * Do NOT attempt reconnect directly here. An expired session at startup
+       * will be detected by ReconnectManager's health monitor and retried with
+       * proper backoff + guard logic. Auto-reconnecting here would bypass those
+       * safeguards and create a duplicate parallel reconnect flow.
+       */
+      log.warn(
+        `Session for "${accountId}" expired. ` +
+        `ReconnectManager will handle re-authentication with retry/backoff.`
+      );
     } else {
       await this.markCorrupted(accountId, entry);
     }
