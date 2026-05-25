@@ -47,13 +47,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check Railway token
+        id: check_token
+        run: |
+          if [ -z "${{ secrets.RAILWAY_TOKEN }}" ]; then
+            echo "has_token=false" >> $GITHUB_OUTPUT
+            echo "⚠️  RAILWAY_TOKEN secret not configured — skipping deploy."
+          else
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Install Railway CLI
+        if: steps.check_token.outputs.has_token == 'true'
         run: npm install -g @railway/cli
 
       - name: Deploy to Railway
+        if: steps.check_token.outputs.has_token == 'true'
         run: railway up --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
       - name: Done
+        if: steps.check_token.outputs.has_token == 'true'
         run: echo "✅ Deployed to Railway — https://railway.app/dashboard"
