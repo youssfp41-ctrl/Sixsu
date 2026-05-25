@@ -32,16 +32,22 @@ export class CacheManager implements ISystem {
 
   /**
    * Swap the underlying provider at runtime (e.g. switch to Redis).
-   * All existing CacheStore instances will automatically use the new provider.
+   *
+   * Existing CacheStore instances (already returned by store()) are updated
+   * in-place via setProvider(), so any external code holding a reference to
+   * a CacheStore will automatically use the new provider without needing to
+   * call store() again.  This makes the switch transparent to callers.
    */
   useProvider(provider: ICacheProvider): void {
     this.provider.stop?.();
     this.provider = provider;
     this.provider.start?.();
 
-    for (const [ns, store] of this.stores.entries()) {
-      this.stores.set(ns, new CacheStore(this.provider, ns));
-      void store;
+    // Update all existing CacheStore instances in-place so external references
+    // continue to work.  Previously this created new CacheStore objects which
+    // broke any caller that had cached the old store reference.
+    for (const store of this.stores.values()) {
+      store.setProvider(this.provider);
     }
 
     this.log.info("Cache provider swapped.", { provider: provider.constructor.name });
