@@ -4,6 +4,10 @@
 const APP_NAME = "sixsu-bot";
 const LOG_DATE = "YYYY-MM-DD HH:mm:ss Z";
 
+// Railway and other cloud platforms inject PORT dynamically.
+// Fall back to 3000 for local VPS deployments.
+const PORT = process.env.PORT || 3000;
+
 module.exports = {
   apps: [
     {
@@ -56,16 +60,21 @@ module.exports = {
       merge_logs:      true,
 
       // ─── Environments ─────────────────────────────────────────────────────
-      // Activated with:  pm2 start ecosystem.config.js
+      // Development (VPS): pm2 start ecosystem.config.js
       env: {
         NODE_ENV: "development",
-        PORT:     3000,
+        PORT,
       },
 
-      // Activated with:  pm2 start ecosystem.config.js --env production
+      // Production (VPS): pm2 start ecosystem.config.js --env production
+      // On Railway: PORT is injected by the platform — this env block is
+      // only used when running PM2 directly on a VPS.
       env_production: {
-        NODE_ENV: "production",
-        PORT:     3000,
+        NODE_ENV:     "production",
+        PORT,
+        // Disable source-map-support in favour of --enable-source-maps flag
+        // which is already passed via node_args above.
+        NODE_OPTIONS: "--enable-source-maps",
       },
     },
   ],
