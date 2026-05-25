@@ -12,25 +12,33 @@ export class RecurringTask implements ITask {
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly options: RecurringTaskOptions;
+  private readonly onComplete: (() => void) | undefined;
 
-  constructor(options: RecurringTaskOptions) {
-    this.id = options.id ?? uuidv4();
-    this.name = options.name;
-    this.options = options;
+  /**
+   * @param options   Task configuration.
+   * @param onComplete  Called once when the task reaches maxRuns and stops
+   *                    naturally. Used by TaskScheduler to evict the task
+   *                    from its registry, preventing memory accumulation.
+   */
+  constructor(options: RecurringTaskOptions, onComplete?: () => void) {
+    this.id         = options.id ?? uuidv4();
+    this.name       = options.name;
+    this.options    = options;
+    this.onComplete = onComplete;
 
     const now = new Date();
     this.meta = {
-      id: this.id,
-      name: this.name,
-      status: "idle",
-      createdAt: now,
-      lastRunAt: null,
-      nextRunAt: options.runImmediately
+      id:         this.id,
+      name:       this.name,
+      status:     "idle",
+      createdAt:  now,
+      lastRunAt:  null,
+      nextRunAt:  options.runImmediately
         ? now
         : new Date(Date.now() + options.intervalMs),
-      runCount: 0,
+      runCount:   0,
       errorCount: 0,
-      lastError: null,
+      lastError:  null,
     };
   }
 
@@ -58,7 +66,7 @@ export class RecurringTask implements ITask {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.meta.status = "cancelled";
+    this.meta.status    = "cancelled";
     this.meta.nextRunAt = null;
     log.info(`Recurring task "${this.name}" [${this.id}] cancelled.`);
   }
@@ -79,12 +87,14 @@ export class RecurringTask implements ITask {
       );
       this.cancel();
       this.meta.status = "completed";
+      // Notify scheduler so it can remove this task from its registry.
+      this.onComplete?.();
       return;
     }
 
     if (this.timer !== null) {
       this.meta.nextRunAt = new Date(Date.now() + this.options.intervalMs);
-      this.meta.status = "idle";
+      this.meta.status    = "idle";
     }
   }
 }
