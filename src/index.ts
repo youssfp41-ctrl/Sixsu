@@ -28,7 +28,11 @@ import { createLoggingMiddleware } from "./middleware/built-in/logging.middlewar
 import { createCooldownMiddleware } from "./middleware/built-in/cooldown.middleware";
 import { createAntiSpamMiddleware } from "./middleware/built-in/antispam.middleware";
 import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
-import { BanStore, createBannedMiddleware } from "./middleware/built-in/banned.middleware";
+import {
+  BanStore,
+  BanEntry,
+  createBannedMiddleware,
+} from "./middleware/built-in/banned.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
 import { CacheManager } from "./cache/CacheManager";
 import { createCacheProvider } from "./cache/providers/createProvider";
@@ -57,8 +61,29 @@ import {
   CheckSeverity,
 } from "./security";
 
+/**
+ * Produces a user-facing message when a blocked user tries to interact.
+ * Differentiates ban / mute / kick by reason prefix set by ModerationService.
+ */
+function buildBanMessage(entry: BanEntry): string {
+  const expiry = entry.expiresAt
+    ? ` ينتهي: ${entry.expiresAt.toLocaleString("ar-SA")}.`
+    : "";
+
+  if (entry.reason?.startsWith("[MUTED]")) {
+    return `🔇 تم كتمك من التفاعل مع البوت.${expiry}`;
+  }
+  if (entry.reason?.startsWith("[KICKED]")) {
+    return `👢 تم طردك مؤقتاً.${expiry}`;
+  }
+
+  const reason = entry.reason ? ` السبب: ${entry.reason}.` : "";
+  const durStr = entry.expiresAt ? expiry : " الحظر دائم.";
+  return `🚫 أنت محظور من استخدام البوت.${reason}${durStr}`;
+}
+
 async function bootstrap(): Promise<void> {
-  // ─── Security: Startup Validation ────────────────────────────────────────
+  // ── Security: Startup Validation ─────────────────────────────────────────
   const credManager = new CredentialManager({
     loaders: [
       new EnvLoader({
@@ -157,19 +182,17 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
-  // ─── Middleware Pipeline ──────────────────────────────────────────────────
+  // ── BanStore + Middleware Pipeline ────────────────────────────────────────
   const banStore = new BanStore();
 
   const mwManager = new MiddlewareManager()
-    .register(createBannedMiddleware({ store: banStore }))
+    .register(createBannedMiddleware({ store: banStore, message: buildBanMessage }))
     .register(createLoggingMiddleware({ logEntry: true }))
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
     .register(createPermissionsMiddleware({ adminIds: config.bot.adminIds }));
 
-  log.info(
-    `Middleware pipeline: [${mwManager.list().join(" → ")}] → typing → execute`
-  );
+  log.info(`Middleware pipeline: [${mwManager.list().join(" → ")}] → typing → execute`);
 
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
     .use(mwManager.fn("banned"))
@@ -188,7 +211,7 @@ async function bootstrap(): Promise<void> {
   setReconnectManager(reconnect);
   setBanStore(banStore);
 
-  // ─── Plugin System ────────────────────────────────────────────────────────
+  // ── Plugin System + Core Services ────────────────────────────────────────
   const pluginManager = new PluginManager({
     commandRegistry: registry,
     scheduler,
@@ -196,14 +219,13 @@ async function bootstrap(): Promise<void> {
     watch:      config.plugins.watch,
   });
 
-  // ── Core services — available to all plugins via ctx.consumeService() ──
-  // "command-registry" — consumed by /help to list all commands.
-  // "fb-access-token"  — consumed by utility plugin for Graph API calls.
-  // "facebook-client"  — consumed by plugins that need to send FB API requests.
   const svcReg = pluginManager.getServiceRegistry();
+  // Utility plugin consumers
   svcReg.provide("command-registry",  registry,                        "core");
   svcReg.provide("fb-access-token",   config.facebook.pageAccessToken, "core");
   svcReg.provide("facebook-client",   client,                          "core");
+  // Moderation plugin consumer
+  svcReg.provide("ban-store",         banStore,                        "core");
 
   bot.register(pluginManager);
   // ─────────────────────────────────────────────────────────────────────────
@@ -215,7 +237,6 @@ async function bootstrap(): Promise<void> {
       log.info(`Server listening on port ${config.port}`, { env: config.nodeEnv });
       resolve();
     });
-
     server.on("error", (err: Error) => {
       log.error("Failed to start server.", err);
       reject(err);
@@ -224,7 +245,6 @@ async function bootstrap(): Promise<void> {
 
   await bot.start();
 
-  // ─── PM2 ready signal ─────────────────────────────────────────────────────
   if (process.send) {
     process.send("ready");
     log.info("Sent ready signal to PM2.");
