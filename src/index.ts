@@ -19,6 +19,7 @@ import { FacebookClient }              from "./facebook/FacebookClient";
 import { FacebookSender }              from "./facebook/FacebookSender";
 import { CookieHttpClient }            from "./facebook/cookie/CookieHttpClient";
 import { CookieSender }                from "./facebook/cookie/CookieSender";
+import { MessengerPoller }             from "./facebook/cookie/MessengerPoller";
 import { ISender }                     from "./facebook/types/ISender";
 import { FacebookEventNormalizer }     from "./facebook/FacebookEventNormalizer";
 import { FacebookGateway }             from "./facebook/FacebookGateway";
@@ -49,6 +50,7 @@ import { PluginManager }     from "./plugins/PluginManager";
 import {
   setCommandPipeline, setCommandRegistry, setTaskScheduler,
   setReconnectManager, setBanStore, setUserService,
+  handleMessage,
 } from "./handlers/message.handler";
 import {
   setGroupSender, handleMemberJoined, handleMemberLeft,
@@ -215,6 +217,28 @@ async function bootstrap(): Promise<void> {
   if (cookieClient) {
     svcReg.provide("fb-cookie-client", cookieClient, "core");
     log.info("Core service registered: fb-cookie-client.");
+
+    // ── Messenger Poller — استقبال الرسائل عبر cookies بدون webhook ────────
+    const poller = new MessengerPoller(cookieClient);
+    poller.setHandler((entries) => {
+      for (const entry of entries) {
+        const fakeBody = {
+          object: "page",
+          entry: [{
+            id:        cookieClient!.getUserId(),
+            time:      Date.now(),
+            messaging: [entry],
+          }],
+        };
+        gateway.processWebhookBody(fakeBody, handleMessage, {
+          onMemberJoined: handleMemberJoined,
+          onMemberLeft:   handleMemberLeft,
+        });
+      }
+    });
+    bot.register(poller);
+    log.info("MessengerPoller registered — polling for new messages.");
+    // ─────────────────────────────────────────────────────────────────────
   }
 
   bot.register(pluginManager);
