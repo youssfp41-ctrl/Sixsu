@@ -11,6 +11,13 @@ export class SessionStore {
   private readonly filePath:      string;
   private readonly encryptionKey: string;
 
+  /**
+   * Write operations are serialised through this promise chain so that
+   * concurrent save() calls never interleave their read-modify-write cycle
+   * and overwrite each other's data.
+   */
+  private writeQueue: Promise<void> = Promise.resolve();
+
   constructor(filePath: string, encryptionKey: string) {
     this.filePath      = filePath;
     this.encryptionKey = encryptionKey;
@@ -18,17 +25,9 @@ export class SessionStore {
   }
 
   async save(entry: SessionEntry): Promise<void> {
-    const file           = this.readRaw();
-    const encryptedState = await CryptoHelper.encrypt(
-      entry.encryptedAppState,
-      this.encryptionKey
-    );
-
-    file.sessions[entry.accountId] = { ...entry, encryptedAppState: encryptedState };
-    file.updatedAt = new Date().toISOString();
-
-    this.writeRaw(file);
-    log.info(`Session saved for account: ${entry.accountId}`);
+    // Chain behind any in-flight write so operations are serialised.
+    this.writeQueue = this.writeQueue.then(() => this.doSave(entry));
+    return this.writeQueue;
   }
 
   async load(accountId: string): Promise<SessionEntry | null> {
@@ -48,6 +47,36 @@ export class SessionStore {
   }
 
   delete(accountId: string): boolean {
+    // Serialise deletes through the write queue as well.
+    let resolved = false;
+    this.writeQueue = this.writeQueue.then(() => {
+      resolved = this.doDelete(accountId);
+    });
+    // Synchronous return value is a best-effort signal; callers should await save().
+    return this.doDelete_sync(accountId, resolved);
+  }
+
+  listAccounts(): string[] {
+    return Object.keys(this.readRaw().sessions);
+  }
+
+  // ── Private ──────────────────────────────────────────────────────────────
+
+  private async doSave(entry: SessionEntry): Promise<void> {
+    const file           = this.readRaw();
+    const encryptedState = await CryptoHelper.encrypt(
+      entry.encryptedAppState,
+      this.encryptionKey
+    );
+
+    file.sessions[entry.accountId] = { ...entry, encryptedAppState: encryptedState };
+    file.updatedAt = new Date().toISOString();
+
+    this.writeRaw(file);
+    log.info(`Session saved for account: ${entry.accountId}`);
+  }
+
+  private doDelete(accountId: string): boolean {
     const file = this.readRaw();
     if (!file.sessions[accountId]) return false;
 
@@ -59,8 +88,9 @@ export class SessionStore {
     return true;
   }
 
-  listAccounts(): string[] {
-    return Object.keys(this.readRaw().sessions);
+  /** Synchronous variant used for the immediate return value only. */
+  private doDelete_sync(accountId: string, _queued: boolean): boolean {
+    return this.readRaw().sessions[accountId] !== undefined ? true : false;
   }
 
   private ensureDir(): void {
