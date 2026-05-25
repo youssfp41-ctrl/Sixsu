@@ -15,6 +15,15 @@ export class ProcessErrorHandler implements ISystem {
   private errorTimestamps: number[] = [];
   private onCritical?: () => Promise<void>;
 
+  /**
+   * Bound handler references stored so that removeListener() receives the
+   * exact same function object that was passed to process.on() in initialize().
+   * Using .bind() inline would create new references each time, making
+   * removeListener a no-op and causing listener accumulation across restarts.
+   */
+  private boundUncaughtException!:  (error: Error)   => void;
+  private boundUnhandledRejection!: (reason: unknown) => void;
+
   constructor(reporter?: ErrorReporter) {
     this.reporter = reporter ?? new ErrorReporter(this.log);
   }
@@ -25,14 +34,18 @@ export class ProcessErrorHandler implements ISystem {
   }
 
   async initialize(): Promise<void> {
-    process.on("uncaughtException",  this.handleUncaughtException.bind(this));
-    process.on("unhandledRejection", this.handleUnhandledRejection.bind(this));
+    this.boundUncaughtException  = this.handleUncaughtException.bind(this);
+    this.boundUnhandledRejection = this.handleUnhandledRejection.bind(this);
+
+    process.on("uncaughtException",  this.boundUncaughtException);
+    process.on("unhandledRejection", this.boundUnhandledRejection);
+
     this.log.info("Process error handlers registered.");
   }
 
   async destroy(): Promise<void> {
-    process.removeListener("uncaughtException",  this.handleUncaughtException.bind(this));
-    process.removeListener("unhandledRejection", this.handleUnhandledRejection.bind(this));
+    process.removeListener("uncaughtException",  this.boundUncaughtException);
+    process.removeListener("unhandledRejection", this.boundUnhandledRejection);
     this.log.info("Process error handlers removed.");
   }
 
