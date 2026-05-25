@@ -90,7 +90,7 @@ export class CookieSender implements ISender {
   /** Add an emoji reaction to a message (best-effort, never throws). */
   async sendReaction(
     messageId:   string,
-    recipientId: string,
+    _recipientId: string,
     emoji:       string
   ): Promise<void> {
     try {

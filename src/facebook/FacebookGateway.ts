@@ -1,8 +1,8 @@
 import { Request, Response }       from "express";
 import { WebhookBody }             from "../types";
 import { FacebookConnection }      from "./FacebookConnection";
-import { FacebookSender }          from "./FacebookSender";
 import { FacebookEventNormalizer } from "./FacebookEventNormalizer";
+import { ISender }                 from "./types/ISender";
 import { ContextBuilder }          from "../context/ContextBuilder";
 import { Context }                 from "../context/Context";
 import { FBMemberJoinedEvent, FBMemberLeftEvent } from "./types/events";
@@ -26,7 +26,7 @@ export class FacebookGateway {
 
   constructor(
     connection: FacebookConnection,
-    sender:     FacebookSender,
+    sender:     ISender,
     normalizer: FacebookEventNormalizer
   ) {
     this.connection     = connection;
@@ -121,6 +121,8 @@ export class FacebookGateway {
         }
 
         // ── [3b] Message / postback — build context then dispatch ──────────
+        if (event.type !== "message" && event.type !== "postback") continue;
+
         const start = Date.now();
         this.contextBuilder
           .build(event)

@@ -1,4 +1,4 @@
-import { IMiddleware, MiddlewareFn, toMiddlewareFn } from "./types/IMiddleware";
+import { IMiddleware, MiddlewareFn } from "./types/IMiddleware";
 import { Context }         from "../context/Context";
 import { ICommand }        from "../commands/types/ICommand";
 import { NextFn }          from "./types/IMiddleware";

@@ -24,7 +24,7 @@
 
 import { IPlugin, PluginManifest }  from "../../types/IPlugin";
 import { IPluginContext }            from "../../types/IPluginContext";
-import { BanStore }                  from "../../../../middleware/built-in/banned.middleware";
+import { BanStore }                  from "../../../middleware/built-in/banned.middleware";
 import { ModerationRepository }     from "./db/ModerationRepository";
 import { ModerationService }        from "./services/ModerationService";
 import { MOD_SERVICES, IModerationService } from "./services/IModerationService";

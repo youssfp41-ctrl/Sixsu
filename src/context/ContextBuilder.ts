@@ -1,6 +1,5 @@
 import { ISender }              from "../facebook/types/ISender";
 import {
-  FBEvent,
   FBMessageEvent,
   FBPostbackEvent,
 } from "../facebook/types/events";
@@ -50,10 +49,7 @@ export class ContextBuilder {
    * On any error the builder falls back to a minimal user object so the
    * message is never silently dropped.
    */
-  async build(event: FBEvent): Promise<Context> {
-    if (event.type === "unknown") {
-      throw new Error("Cannot build context for unknown event type.");
-    }
+  async build(event: FBMessageEvent | FBPostbackEvent): Promise<Context> {
 
     const buildStart = Date.now();
     log.debug("Building context.", {

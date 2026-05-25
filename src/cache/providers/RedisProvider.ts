@@ -34,6 +34,8 @@ export class RedisProvider implements ICacheProvider {
     // Dynamic import — throws MODULE_NOT_FOUND if ioredis isn't installed
     let RedisClient: new (url: string) => unknown;
     try {
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore — ioredis is an optional peer dependency
       const mod = await import("ioredis");
       RedisClient = (mod.default ?? mod) as typeof RedisClient;
     } catch {

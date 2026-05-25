@@ -96,8 +96,7 @@ export class CookieHttpClient {
     const raw = res.data as string;
 
     // Facebook returns one JSON object per line — take the first valid one.
-    for (const line of raw.split("
-")) {
+    for (const line of raw.split("\n")) {
       const t = line.trim();
       if (t.startsWith("{") || t.startsWith("[")) {
         try { return JSON.parse(t); } catch { /* try next line */ }
