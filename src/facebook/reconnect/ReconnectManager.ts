@@ -224,7 +224,8 @@ export class ReconnectManager implements ISystem {
 
       onDisconnected: (accountId) => {
         log.warn(`[${accountId}] Health monitor detected disconnection.`);
-        // Only trigger if not already retrying or blocked
+
+        // Only trigger if not already retrying or blocked.
         const record = this.records.get(accountId);
         if (
           record &&
@@ -233,7 +234,15 @@ export class ReconnectManager implements ISystem {
         ) {
           return;
         }
-        void this.reconnect(accountId);
+
+        // Fire-and-forget with explicit error handling so rejections don't
+        // surface as unhandledRejection events on the process.
+        this.reconnect(accountId).catch((err: unknown) => {
+          log.error(
+            `[${accountId}] Reconnect triggered by health monitor threw unexpectedly.`,
+            err instanceof Error ? err : new Error(String(err))
+          );
+        });
       },
 
       getAccounts: () => this.auth.getAuthenticatedAccounts(),
