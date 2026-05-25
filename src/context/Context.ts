@@ -1,30 +1,33 @@
-import { ISender } from "../facebook/types/ISender";
+import { ISender }                                   from "../facebook/types/ISender";
 import { ContextUser, ContextThread, ContextMessage } from "./types";
+import type { UserRole }                              from "../users/types/IUserService";
 
 export class Context {
-  readonly user: ContextUser;
-  readonly thread: ContextThread;
-  readonly message: ContextMessage;
-  readonly args: string[];
+  readonly user:        ContextUser;
+  readonly thread:      ContextThread;
+  readonly message:     ContextMessage;
+  readonly args:        string[];
   readonly commandName: string;
 
   private readonly sender: ISender;
 
   constructor(
-    user: ContextUser,
-    thread: ContextThread,
+    user:    ContextUser,
+    thread:  ContextThread,
     message: ContextMessage,
-    sender: ISender
+    sender:  ISender
   ) {
-    this.user = user;
-    this.thread = thread;
+    this.user    = user;
+    this.thread  = thread;
     this.message = message;
-    this.sender = sender;
+    this.sender  = sender;
 
-    const parts = (message.text ?? "").trim().split(/\s+/).filter(Boolean);
+    const parts      = (message.text ?? "").trim().split(/\s+/).filter(Boolean);
     this.commandName = parts[0]?.toLowerCase() ?? "";
-    this.args = parts.slice(1);
+    this.args        = parts.slice(1);
   }
+
+  // ── Messaging ─────────────────────────────────────────────────────────
 
   async reply(text: string): Promise<void> {
     await this.sender.sendText(this.user.id, text);
@@ -37,6 +40,8 @@ export class Context {
   async typingOn(): Promise<void> {
     await this.sender.sendTyping(this.user.id);
   }
+
+  // ── Args helpers ──────────────────────────────────────────────────────
 
   hasArgs(): boolean {
     return this.args.length > 0;
@@ -54,5 +59,30 @@ export class Context {
 
   getRemainingText(fromIndex = 0): string {
     return this.args.slice(fromIndex).join(" ");
+  }
+
+  // ── User profile helpers ──────────────────────────────────────────────
+
+  /**
+   * Returns the user's preference value for `key`,
+   * or `defaultValue` if the preference is not set.
+   */
+  getPreference<T>(key: string, defaultValue: T): T {
+    const val = this.user.preferences[key];
+    return (val !== undefined ? val : defaultValue) as T;
+  }
+
+  /**
+   * Returns true if the user's role is at least as privileged as `role`.
+   * Hierarchy (ascending): user -> moderator -> admin -> owner
+   */
+  hasRole(role: UserRole): boolean {
+    const hierarchy: UserRole[] = ["user", "moderator", "admin", "owner"];
+    return hierarchy.indexOf(this.user.role) >= hierarchy.indexOf(role);
+  }
+
+  /** Convenience — true only on the user's very first message to the bot. */
+  get isNewUser(): boolean {
+    return this.user.isNew;
   }
 }
