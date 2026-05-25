@@ -53,11 +53,6 @@ import {
 import {
   setGroupSender, handleMemberJoined, handleMemberLeft,
 } from "./handlers/group.handler";
-import {
-  CredentialManager, EnvLoader, EncryptedFileLoader,
-  StartupValidator, EnvPresenceCheck, CredentialLoadCheck,
-  SessionIntegrityCheck, CheckSeverity,
-} from "./security";
 
 function buildBanMessage(entry: BanEntry): string {
   const expiry = entry.expiresAt
@@ -72,40 +67,12 @@ function buildBanMessage(entry: BanEntry): string {
 
 async function bootstrap(): Promise<void> {
 
-  // ── Startup Validation ────────────────────────────────────────────────────
-  const credManager = new CredentialManager({
-    loaders: [
-      new EnvLoader({
-        // FB_PAGE_ACCESS_TOKEN is no longer required — AppState cookies are used instead.
-        required: ["FB_APP_SECRET", "FB_VERIFY_TOKEN"],
-        optional: ["SESSION_SECRET", "FB_PAGE_ACCESS_TOKEN"],
-      }),
-      ...(config.auth.appStateFile
-        ? [new EncryptedFileLoader({
-            filePath:      config.auth.appStateFile,
-            encryptionKey: config.auth.sessionSecret,
-          })]
-        : []),
-    ],
-  });
-
-  const validator = new StartupValidator()
-    .add(new EnvPresenceCheck({
-      required:  ["FB_APP_SECRET", "FB_VERIFY_TOKEN", "SESSION_SECRET"],
-      severity:  CheckSeverity.CRITICAL,
-    }))
-    .add(new CredentialLoadCheck(credManager))
-    .add(new SessionIntegrityCheck({
-      sessionFilePath: config.auth.sessionFile,
-      severity:        CheckSeverity.WARNING,
-    }));
-
-  const report = await validator.validate();
-
-  if (!report.passed) {
+  // ── Cookie-only auth check ────────────────────────────────────────────────
+  const appStateEnvKey = config.auth.appStateEnvKey;
+  const appStateValue  = process.env[appStateEnvKey] ?? process.env["FB_APPSTATE"];
+  if (!appStateValue && !config.auth.appStateFile) {
     log.error(
-      `Startup aborted — ${report.criticalFailed.length} critical check(s) failed: ` +
-      `[${report.criticalFailed.join(", ")}]`
+      "لم يُعثر على AppState. عيّن FB_APPSTATE (base64 cookie export) في متغيرات البيئة."
     );
     process.exit(1);
   }
@@ -129,20 +96,23 @@ async function bootstrap(): Promise<void> {
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
 
-  // ── Auth / Session system ────────────────────────────────────────────────
+  // ── Auth / Session ────────────────────────────────────────────────────────
   const auth = new AuthManager();
 
   if (config.auth.appStateFile) {
     const { provider } = AuthManager.fromFile("default", config.auth.appStateFile);
     auth.registerAccount("default", provider);
-  } else if (process.env[config.auth.appStateEnvKey]) {
-    const { provider } = AuthManager.fromEnv("default", config.auth.appStateEnvKey);
+  } else if (appStateValue) {
+    const { provider } = AuthManager.fromEnv("default", appStateEnvKey);
     auth.registerAccount("default", provider);
   }
 
+  // Load credentials now so sender can use them
+  await auth.loginAll();
+
   bot.register(auth);
 
-  const sessionStore   = new SessionStore(config.auth.sessionFile, config.auth.sessionSecret);
+  const sessionStore   = new SessionStore(config.auth.sessionFile, config.auth.sessionSecret ?? "");
   const sessionManager = new SessionManager({
     store: sessionStore,
     auth,
@@ -158,58 +128,41 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(reconnect);
 
-  // ── Sender selection: cookies first, page token as fallback ──────────────
-  //
-  //   Mode A — Cookie / AppState (preferred, no page token needed):
-  //     Set FB_APPSTATE or FB_APPSTATE_FILE → Bot sends via cookie auth.
-  //
-  //   Mode B — Graph API fallback (requires FB_PAGE_ACCESS_TOKEN):
-  //     Set FB_PAGE_ACCESS_TOKEN → Bot sends via official Messenger Platform API.
-  //
+  // ── Sender: cookies first, page token as fallback ─────────────────────────
   let sender: ISender;
   let cookieClient: CookieHttpClient | null = null;
 
   const credentials = auth.getCredentials("default");
 
   if (credentials) {
-    // ── Mode A: Cookie-based sender ────────────────────────────────────────
     cookieClient = new CookieHttpClient(credentials.appState);
     sender       = new CookieSender(cookieClient);
     log.info("Sender: CookieSender active (AppState cookies).", {
       userId: cookieClient.getUserId(),
     });
   } else if (config.facebook.pageAccessToken) {
-    // ── Mode B: Graph API sender (legacy) ──────────────────────────────────
     const connection = new FacebookConnection();
     const client     = new FacebookClient(connection);
     sender           = new FacebookSender(client);
     connection.connect();
-    log.info("Sender: FacebookSender active (Graph API / Page Access Token).");
+    log.info("Sender: FacebookSender active (Graph API).");
   } else {
-    log.error(
-      "No sender available. Set either:" +
-      "\n  • FB_APPSTATE (base64 cookie export) — recommended" +
-      "\n  • FB_APPSTATE_FILE (path to appState JSON file)" +
-      "\n  • FB_PAGE_ACCESS_TOKEN (Graph API fallback)"
-    );
+    log.error("No sender available. Set FB_APPSTATE in your environment.");
     process.exit(1);
   }
 
   setGroupSender(sender);
-  log.info("GroupHandler wired with sender.");
 
   const normalizer = new FacebookEventNormalizer();
   const connection  = new FacebookConnection();
-  const gateway    = new FacebookGateway(connection, sender, normalizer);
+  const gateway     = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
-  // ─────────────────────────────────────────────────────────────────────────
 
   // ── User System ───────────────────────────────────────────────────────────
   const userRepo = new UserRepository();
   const userSvc  = new UserService(userRepo, cache.store("users"));
   gateway.getContextBuilder().setUserService(userSvc);
   setUserService(userSvc);
-  log.info("UserService wired into ContextBuilder.");
   // ─────────────────────────────────────────────────────────────────────────
 
   const registry    = new CommandRegistry();
@@ -219,7 +172,6 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
-  // ── Middleware Pipeline ───────────────────────────────────────────────────
   const banStore = new BanStore();
 
   const mwManager = new MiddlewareManager()
@@ -228,8 +180,6 @@ async function bootstrap(): Promise<void> {
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
     .register(createPermissionsMiddleware({ adminIds: config.bot.adminIds }));
-
-  log.info(`Middleware pipeline: [${mwManager.list().join(" → ")}] → typing → execute`);
 
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
     .use(mwManager.fn("banned"))
@@ -247,9 +197,8 @@ async function bootstrap(): Promise<void> {
   setTaskScheduler(scheduler);
   setReconnectManager(reconnect);
   setBanStore(banStore);
-  // ─────────────────────────────────────────────────────────────────────────
 
-  // ── Plugin System + Core Services ────────────────────────────────────────
+  // ── Plugin System ─────────────────────────────────────────────────────────
   const pluginManager = new PluginManager({
     commandRegistry: registry,
     scheduler,
@@ -263,14 +212,9 @@ async function bootstrap(): Promise<void> {
   svcReg.provide("ban-store",        banStore,  "core");
   svcReg.provide("user-service",     userSvc,   "core");
 
-  // Provide cookie client if available (plugins can use it for advanced FB ops)
   if (cookieClient) {
     svcReg.provide("fb-cookie-client", cookieClient, "core");
     log.info("Core service registered: fb-cookie-client.");
-  } else if (config.facebook.pageAccessToken) {
-    // Legacy: expose page token for plugins that still reference it
-    svcReg.provide("fb-access-token", config.facebook.pageAccessToken, "core");
-    log.info("Core service registered: fb-access-token (Graph API mode).");
   }
 
   bot.register(pluginManager);
