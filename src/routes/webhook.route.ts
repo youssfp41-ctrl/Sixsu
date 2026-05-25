@@ -3,6 +3,11 @@ import { WebhookBody } from "../types";
 import { FacebookGateway } from "../facebook/FacebookGateway";
 import { handleMessage } from "../handlers/message.handler";
 
+/**
+ * Note: Facebook HMAC-SHA256 signature verification (X-Hub-Signature-256) is
+ * applied as middleware in app.ts before this router is mounted, so all
+ * requests reaching here have already been authenticated in production.
+ */
 export function createWebhookRouter(gateway: FacebookGateway): Router {
   const router = Router();
 
