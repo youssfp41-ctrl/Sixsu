@@ -34,8 +34,10 @@ import {
   createBannedMiddleware,
 } from "./middleware/built-in/banned.middleware";
 import { DatabaseManager } from "./database/DatabaseManager";
+import { UserRepository }  from "./database/repositories/user.repository";
 import { CacheManager } from "./cache/CacheManager";
 import { createCacheProvider } from "./cache/providers/createProvider";
+import { UserService }     from "./users/UserService";
 import { TaskScheduler } from "./scheduler";
 import { AuthManager }      from "./facebook/auth/AuthManager";
 import { SessionManager }   from "./facebook/session/SessionManager";
@@ -49,6 +51,7 @@ import {
   setTaskScheduler,
   setReconnectManager,
   setBanStore,
+  setUserService,
 } from "./handlers/message.handler";
 import {
   CredentialManager,
@@ -175,6 +178,14 @@ async function bootstrap(): Promise<void> {
 
   connection.connect();
 
+  // ── User System ───────────────────────────────────────────────────────────
+  const userRepo = new UserRepository();
+  const userSvc  = new UserService(userRepo, cache.store("users"));
+  gateway.getContextBuilder().setUserService(userSvc);
+  setUserService(userSvc);
+  log.info("UserService: wired into ContextBuilder.");
+  // ─────────────────────────────────────────────────────────────────────────
+
   const registry    = new CommandRegistry();
   const loader      = new CommandLoader(registry);
   const commandsDir = path.resolve(config.bot.commandsDir);
@@ -220,12 +231,12 @@ async function bootstrap(): Promise<void> {
   });
 
   const svcReg = pluginManager.getServiceRegistry();
-  // Utility plugin consumers
+  // Core services (consumed by plugins)
   svcReg.provide("command-registry",  registry,                        "core");
   svcReg.provide("fb-access-token",   config.facebook.pageAccessToken, "core");
   svcReg.provide("facebook-client",   client,                          "core");
-  // Moderation plugin consumer
   svcReg.provide("ban-store",         banStore,                        "core");
+  svcReg.provide("user-service",      userSvc,                         "core");
 
   bot.register(pluginManager);
   // ─────────────────────────────────────────────────────────────────────────
