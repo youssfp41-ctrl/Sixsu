@@ -9,7 +9,7 @@
 +        // Facebook 2025+: quoted JSON keys in MqttWebConfig
 +        let quotedFBMQTTMatch = html.match(/\["MqttWebConfig",\[\],\{"fbid":"(.+?)","appID":219994525426954,"endpoint":"(.+?)"/);
 +        if (quotedFBMQTTMatch) {
-+          mqttEndpoint = quotedFBMQTTMatch[2].replace(/\\//g, "/");
++          mqttEndpoint = quotedFBMQTTMatch[2].replace(/\\\//g, "/");
 +          region = new URL(mqttEndpoint).searchParams.get("region").toUpperCase();
 +          log.info("login", `Got this account's message region: ${region}`);
 +        } else {
@@ -44,3 +44,9 @@
        });
    };
  
+@@ -762,7 +759,7 @@
+     //Same request as getThreadList
+     form = {
+-      "av": ctx.globalOptions.pageID,
++      "av": ctx.globalOptions.pageID || ctx.userID,
+       "queries": JSON.stringify({
