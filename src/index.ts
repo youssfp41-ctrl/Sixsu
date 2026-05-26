@@ -73,11 +73,13 @@ async function bootstrap(): Promise<void> {
   // ── AppState check ────────────────────────────────────────────────────────
   const appStateEnvKey = config.auth.appStateEnvKey;
   const appStateValue  = process.env[appStateEnvKey] ?? process.env["FB_APPSTATE"];
-  if (!appStateValue && !config.auth.appStateFile) {
-    log.error(
-      "لم يُعثر على AppState. عيّن FB_APPSTATE (base64 cookie export) في متغيرات البيئة."
+  const hasAppState    = !!(appStateValue || config.auth.appStateFile);
+
+  if (!hasAppState) {
+    log.warn(
+      "FB_APPSTATE غير مُعيَّن. سيعمل البوت بدون اتصال Facebook. " +
+      "عيّن FB_APPSTATE (base64 cookie export) لتفعيل المراسلة."
     );
-    process.exit(1);
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -157,8 +159,12 @@ async function bootstrap(): Promise<void> {
     connection.connect();
     log.info("Sender: FacebookSender active (Graph API).");
   } else {
-    log.error("No sender available. Set FB_APPSTATE in your environment.");
-    process.exit(1);
+    log.warn("No sender available — running in offline/health-only mode. Set FB_APPSTATE to enable messaging.");
+    sender = {
+      sendText:     async () => { log.warn("NoOpSender: sendText called but no FB_APPSTATE configured."); },
+      sendTyping:   async () => {},
+      sendReaction: async () => {},
+    } satisfies ISender;
   }
 
   setGroupSender(sender);
