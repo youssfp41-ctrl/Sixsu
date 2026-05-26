@@ -5,7 +5,7 @@ nixPkgs = ["nodejs_20", "nodePackages_latest.pnpm"]
 cmds = ["pnpm install --no-frozen-lockfile"]
 
 [phases.build]
-cmds = ["pnpm run build"]
+cmds = ["node scripts/patch-fca.js", "pnpm run build"]
 
 [start]
 cmd = "node dist/index.js"
