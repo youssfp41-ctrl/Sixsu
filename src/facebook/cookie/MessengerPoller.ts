@@ -78,7 +78,7 @@ export class MessengerPoller implements ISystem {
       userId: this.userId,
     });
 
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>((resolve) => {
       const appState = this.client.getRawAppState() as unknown[];
 
       fcaLogin({ appState }, (err, api) => {
