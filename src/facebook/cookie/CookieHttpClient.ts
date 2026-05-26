@@ -93,17 +93,42 @@ export class CookieHttpClient {
       responseType: "text",
     });
 
-    const raw = res.data as string;
+    return this.parseResponse(res.data as string);
+  }
 
-    // Facebook returns one JSON object per line — take the first valid one.
-    for (const line of raw.split("\n")) {
-      const t = line.trim();
-      if (t.startsWith("{") || t.startsWith("[")) {
-        try { return JSON.parse(t); } catch { /* try next line */ }
-      }
-    }
+  /**
+   * Make an authenticated POST to any Facebook AJAX endpoint (e.g. Mercury API).
+   * Automatically fetches and injects fb_dtsg + lsd.
+   *
+   * @param path    Relative path, e.g. "/ajax/mercury/thread_list.php"
+   * @param params  Extra form-data parameters.
+   */
+  async apiPost(path: string, params: Record<string, string>): Promise<unknown> {
+    await this.ensureTokens();
 
-    return raw;
+    const body = new URLSearchParams({
+      av:      this.userId,
+      __user:  this.userId,
+      __a:     "1",
+      __req:   "b",
+      __be:    "-1",
+      fb_dtsg: this.fbDtsg!,
+      lsd:     this.lsd ?? "",
+      ...params,
+    });
+
+    const res = await this.http.post(path, body.toString(), {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie":       this.cookieStr,
+        "Origin":       FB_ORIGIN,
+        "Referer":      `${FB_ORIGIN}/messages/`,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      responseType: "text",
+    });
+
+    return this.parseResponse(res.data as string);
   }
 
   /**
@@ -117,6 +142,30 @@ export class CookieHttpClient {
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────
+
+  /**
+   * Parse a Facebook response — strips the `for (;;);` prefix Facebook
+   * prepends to AJAX responses, then returns the first valid JSON object.
+   */
+  private parseResponse(raw: string): unknown {
+    // Strip Facebook's AJAX hijacking prefix
+    const stripped = raw.replace(/^for\s*\(;;\s*\);/, "").trim();
+
+    // Try the whole stripped string first
+    if (stripped.startsWith("{") || stripped.startsWith("[")) {
+      try { return JSON.parse(stripped); } catch { /* fall through to line-by-line */ }
+    }
+
+    // Facebook sometimes returns one JSON object per line
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (t.startsWith("{") || t.startsWith("[")) {
+        try { return JSON.parse(t); } catch { /* try next line */ }
+      }
+    }
+
+    return raw;
+  }
 
   private async ensureTokens(): Promise<void> {
     if (this.fbDtsg) return;
