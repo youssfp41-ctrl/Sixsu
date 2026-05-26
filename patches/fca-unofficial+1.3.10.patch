@@ -1,0 +1,17 @@
+--- a/node_modules/fca-unofficial/src/listenMqtt.js
++++ b/node_modules/fca-unofficial/src/listenMqtt.js
+@@ -721,11 +721,9 @@
+         }
+       })
+       .catch((err) => {
+-        log.error("getSeqId", err);
+-        if (utils.getType(err) == "Object" && err.error === "Not logged in") {
+-          ctx.loggedIn = false;
+-        }
+-        return globalCallback(err);
++        log.warn("getSeqId", "Failed to get sequence ID — connecting to MQTT without seqId:", JSON.stringify(err));
++        // Fallback: connect to MQTT without a seqId rather than giving up entirely
++        listenMqtt(defaultFuncs, api, ctx, globalCallback);
+       });
+   };
+ 
