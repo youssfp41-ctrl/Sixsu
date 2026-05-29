@@ -1,5 +1,8 @@
 interface FBBaseEvent {
   readonly senderId: string;
+  /** Real Facebook user ID. In group chats via FCA, senderId carries the
+   *  threadID for reply routing while senderFbId is the actual user. */
+  readonly senderFbId?: string;
   readonly pageId: string;
   readonly timestamp: number;
 }
@@ -44,3 +47,4 @@ export type FBEvent =
   | FBMemberJoinedEvent
   | FBMemberLeftEvent
   | FBUnknownEvent;
+
