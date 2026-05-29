@@ -29,16 +29,29 @@ export class Context {
 
   // ── Messaging ─────────────────────────────────────────────────────────
 
+  /**
+   * Send a text reply to the conversation.
+   * Uses thread.id (the threadID / conversation ID) so replies go to the
+   * correct group or DM regardless of who sent the message.
+   */
   async reply(text: string): Promise<void> {
-    await this.sender.sendText(this.user.id, text);
+    await this.sender.sendText(this.thread.id, text);
   }
 
+  /**
+   * React to the current message in this conversation.
+   * Uses thread.id to identify the correct conversation context.
+   */
   async react(emoji: string): Promise<void> {
-    await this.sender.sendReaction(this.message.id, this.user.id, emoji);
+    await this.sender.sendReaction(this.message.id, this.thread.id, emoji);
   }
 
+  /**
+   * Send a typing indicator to this conversation.
+   * Uses thread.id for correct targeting in group chats.
+   */
   async typingOn(): Promise<void> {
-    await this.sender.sendTyping(this.user.id);
+    await this.sender.sendTyping(this.thread.id);
   }
 
   // ── Args helpers ──────────────────────────────────────────────────────
