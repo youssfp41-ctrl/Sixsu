@@ -45,7 +45,7 @@ export class MiraiTransport implements ISystem {
   private listenerStartMs   = 0;
 
   private static readonly MAX_LOGIN_ATTEMPTS  = 5;
-  private static readonly STABLE_LISTEN_MS    = 30_000;  // reset counter after 30 s of stable listening
+  private static readonly STABLE_LISTEN_MS    = 30_000;
   private static readonly BASE_LOGIN_DELAY_MS = 5_000;
   private static readonly MAX_LOGIN_DELAY_MS  = 120_000;
 
@@ -57,7 +57,7 @@ export class MiraiTransport implements ISystem {
     forceLogin:        false,
     autoMarkDelivered: true,
     autoMarkRead:      false,
-    autoReconnect:     true,   // fca-unofficial handles transient MQTT reconnects
+    autoReconnect:     true,
   };
 
   constructor(appState: FcaCookie[]) {
@@ -131,7 +131,6 @@ export class MiraiTransport implements ISystem {
       if (err) {
         const stableMs = Date.now() - this.listenerStartMs;
 
-        // Parse the raw error — fca-unofficial may return a plain object
         let errCode: number | undefined;
         let errMsg: string;
 
@@ -145,14 +144,12 @@ export class MiraiTransport implements ISystem {
           errMsg = String(err);
         }
 
-        // ── Fatal Facebook session errors — stop retrying ──────────────
         if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
           log.warn(
             "MiraiTransport: FATAL session error — AppState is expired or invalid." +
-            " Please refresh APPSTATE in Railway environment variables and redeploy.",
+            " Please refresh FB_APPSTATE and restart the bot.",
             { fbErrorCode: errCode, error: errMsg },
           );
-          // Stop the transport — retrying is pointless until AppState is refreshed
           this.running = false;
           this.stopListening();
           this.api = null;
@@ -174,10 +171,17 @@ export class MiraiTransport implements ISystem {
 
       if (!this.running || !event) return;
 
-      // ── [DEBUG-1] Raw event from Facebook MQTT ──────────────────────────
       log.debug("MiraiTransport: raw event received.", { type: event.type });
 
-      this.eventHandler?.(event);
+      // Wrap in try-catch so a bug in the event handler never kills the listener.
+      try {
+        this.eventHandler?.(event);
+      } catch (handlerErr: unknown) {
+        log.error("MiraiTransport: event handler threw — event dropped.", {
+          eventType: (event as Record<string, unknown>).type,
+          error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
+        });
+      }
     });
 
     log.info("MiraiTransport: listener active — waiting for messages.");
