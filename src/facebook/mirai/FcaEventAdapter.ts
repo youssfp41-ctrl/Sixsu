@@ -13,13 +13,16 @@ const log = LoggerManager.getLogger("FcaEventAdapter");
  *     This ensures ctx.reply() sends to the correct conversation for both
  *     DMs (where threadID === senderID) and group chats (where they differ).
  *
- *  2. recipient.id is always the bot's own Facebook user ID.
+ *  2. senderFbId carries the real Facebook user ID — needed for user tracking,
+ *     ban enforcement, and admin permission checks in group chats.
  *
- *  3. Only "message", "message_reply", and group action events are adapted.
+ *  3. recipient.id is always the bot's own Facebook user ID.
+ *
+ *  4. Only "message", "message_reply", and group action events are adapted.
  *     All other FCA event types (typ, read_receipt, presence, etc.) are
  *     silently dropped to avoid polluting the command pipeline.
  *
- *  4. The bot's own messages are dropped (self-listen disabled).
+ *  5. The bot's own messages are dropped (self-listen disabled).
  */
 export class FcaEventAdapter {
   private readonly botUserId: string;
@@ -73,11 +76,13 @@ export class FcaEventAdapter {
       (a) => this.adaptAttachment(a),
     );
 
-    // Use threadID as sender.id — this is the conversation the bot replies to
+    // sender.id = threadID  → correct reply routing for both DMs and groups.
+    // senderFbId = senderID → real user identity for tracking, bans, permissions.
     const entry: MessagingEntry = {
-      sender:    { id: event.threadID },
-      recipient: { id: this.botUserId },
-      timestamp: ts,
+      sender:     { id: event.threadID },
+      senderFbId: event.senderID,
+      recipient:  { id: this.botUserId },
+      timestamp:  ts,
       message: {
         mid:         event.messageID,
         text:        event.body || undefined,
@@ -85,7 +90,6 @@ export class FcaEventAdapter {
       },
     };
 
-    // ── [DEBUG-2] MessagingEntry created — entering pipeline ───────────
     log.info("FcaEventAdapter: message adapted → entering pipeline.", {
       from:        event.senderID,
       thread:      event.threadID,
