@@ -9,7 +9,7 @@
     "build": "node scripts/patch-fca.js && npx tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "preinstall": "node -e \"const ua=process.env.npm_config_user_agent||\"\";if(!ua.includes(\"pnpm\")){try{require(\"child_process\").execSync(\"rm -rf node_modules\",{stdio:\"inherit\"});console.log(\"[preinstall] cleared node_modules for npm install\");}catch(e){}}\""
+    "preinstall": "node scripts/preinstall.js"
   },
   "dependencies": {
     "axios": "^1.16.0",
