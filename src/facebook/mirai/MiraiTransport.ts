@@ -171,7 +171,7 @@ export class MiraiTransport implements ISystem {
 
       if (!this.running || !event) return;
 
-      log.debug("MiraiTransport: raw event received.", { type: event.type });
+      log.info("MiraiTransport: raw event received.", { type: event.type });
 
       // Wrap in try-catch so a bug in the event handler never kills the listener.
       try {
