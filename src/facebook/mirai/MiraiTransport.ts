@@ -5,7 +5,7 @@ import { LoggerManager }   from "../../logger/LoggerManager";
 const log = LoggerManager.getLogger("MiraiTransport");
 
 /* eslint-disable @typescript-eslint/no-var-requires */
-const fcaLogin = require("fca-unofficial-fixed") as (
+const fcaLogin = require("@dongdev/fca-unofficial") as (
   options:  { appState: FcaCookie[] },
   callback: (err: Error | null, api: FcaApi | null) => void,
 ) => void;
