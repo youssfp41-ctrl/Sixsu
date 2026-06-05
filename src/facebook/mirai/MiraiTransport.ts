@@ -19,6 +19,20 @@ const FATAL_FB_ERRORS = new Set([
   1357045, // Account locked
 ]);
 
+/** Error message fragments that indicate the AppState is permanently expired. */
+const SESSION_EXPIRED_HINTS = [
+  "fb_appstate expired",
+  "appstate expired",
+  "appstate die",
+  "c_user/i_user cookie not found",
+  "không tìm thấy cookie",   // fca-unofficial Vietnamese: "cookie not found"
+] as const;
+
+function isSessionExpiredError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return SESSION_EXPIRED_HINTS.some(hint => lower.includes(hint.toLowerCase()));
+}
+
 /**
  * MiraiTransport — Facebook transport layer for Sixsu.
  *
@@ -96,20 +110,39 @@ export class MiraiTransport implements ISystem {
         attempt: this.loginAttempts + 1,
       });
 
+      let resolved = false;
+
       fcaLogin({ appState: this.appState }, (err, api) => {
+        // Guard against fca-unofficial-fixed calling callback twice
+        if (resolved) return;
+
         if (err || !api) {
           const errMsg = err instanceof Error
             ? err.message
             : (err != null ? JSON.stringify(err) : "null API returned");
 
+          // Detect permanent session expiry — no point retrying
+          if (isSessionExpiredError(errMsg)) {
+            log.error(
+              "MiraiTransport: FB_APPSTATE is expired or invalid — stopping all retries." +
+              " Please generate a new appState from Facebook and update FB_APPSTATE in Railway.",
+              { error: errMsg },
+            );
+            this.running = false;
+            resolved = true;
+            resolve();
+            return;
+          }
+
           log.warn("MiraiTransport: login failed.", { error: errMsg });
+          resolved = true;
           resolve();
           this.scheduleReLogin("login-error");
           return;
         }
 
         this.api = api;
-        // Fix: @dongdev/fca-unofficial uses `av: ctx.globalOptions.pageID`
+        // Fix: fca-unofficial uses `av: ctx.globalOptions.pageID`
         // in MQTT syncToken GraphQL requests. For non-Page bots, pageID is
         // undefined which causes the request to fail → no messages received.
         // Setting pageID = userID provides a valid av value.
@@ -119,6 +152,7 @@ export class MiraiTransport implements ISystem {
           userId: api.getCurrentUserID(),
         });
 
+        resolved = true;
         this.startListening();
         resolve();
       });
