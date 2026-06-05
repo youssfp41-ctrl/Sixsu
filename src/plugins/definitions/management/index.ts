@@ -5,6 +5,7 @@ import { IPlugin, PluginManifest } from "../../types/IPlugin";
 import { IPluginContext }          from "../../types/IPluginContext";
 import { ICommand }                from "../../../commands/types/ICommand";
 import { Context }                 from "../../../context/Context";
+import { FcaEvent, FcaGroupEvent } from "../../../facebook/mirai/FcaTypes";
 
 // ─── Extended FCA types ──────────────────────────────────────────────────────
 
@@ -44,6 +45,8 @@ interface IFcaManagement {
 
 interface IMiraiService {
   getApi(): IFcaManagement | null;
+  addRawEventListener(fn: (event: FcaEvent) => void): void;
+  removeRawEventListener(fn: (event: FcaEvent) => void): void;
 }
 
 // ─── Persistent store ────────────────────────────────────────────────────────
@@ -57,7 +60,6 @@ interface ThreadState {
 
 interface StoreData {
   threads:      Record<string, ThreadState>;
-  /** Protected bot nickname per thread. Set only via /بوت (owner only). */
   botNicknames: Record<string, string>;
 }
 
@@ -67,7 +69,6 @@ function loadStore(): StoreData {
   try {
     if (fs.existsSync(DATA_PATH)) {
       const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as StoreData;
-      // Migration: ensure botNicknames field exists in older store files
       if (!raw.botNicknames) raw.botNicknames = {};
       return raw;
     }
@@ -191,7 +192,6 @@ async function showHelp(ctx: Context): Promise<void> {
 
 // ─── Sub-command handlers ────────────────────────────────────────────────────
 
-// /اسم [الاسم الجديد]
 async function handleGroupName(ctx: Context, pCtx: IPluginContext): Promise<void> {
   await ctx.typingOn();
 
@@ -217,11 +217,9 @@ async function handleGroupName(ctx: Context, pCtx: IPluginContext): Promise<void
   }
 }
 
-// /بوت [الاسم] — OWNER ONLY — nickname is persisted and protected
 async function handleBotName(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
   await ctx.typingOn();
 
-  // Only the owner may set/change the bot nickname
   if (!ctx.hasRole("owner")) {
     await ctx.reply("🔐 تغيير اسم البوت مخصص للمالك فقط.");
     return;
@@ -230,7 +228,6 @@ async function handleBotName(ctx: Context, pCtx: IPluginContext, store: StoreDat
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
-  // Ensure we're in a group (but skip the group-admin check for owner)
   let info: ThreadInfo;
   try {
     info = await fcaGetThreadInfo(api, ctx.thread.id);
@@ -249,42 +246,29 @@ async function handleBotName(ctx: Context, pCtx: IPluginContext, store: StoreDat
   if (!newNick) {
     const current = store.botNicknames[ctx.thread.id];
     if (current) {
-      await ctx.reply(`${HEADER}\n\n⌯ الاسم الحالي للبوت في هذا القروب:\n"${current}"\n\nلتغييره: /بوت [الاسم الجديد]`);
+      await ctx.reply(`${HEADER}\n\n🤖 الاسم المحمي الحالي للبوت:\n"${current}"\n\nلتغييره: /بوت [الاسم الجديد]`);
     } else {
-      await ctx.reply("⚠️ الرجاء إدخال الاسم الجديد للبوت.\n مثال: /بوت Sixsu");
+      await ctx.reply(`${HEADER}\n\n⚠️ لم يُعيَّن اسم محمي للبوت في هذا القروب.\n\nلتعيينه: /بوت [الاسم]`);
     }
     return;
   }
 
   const botId = api.getCurrentUserID();
-  if (!botId) { await ctx.reply("⚠️ تعذّر معرفة هوية البوت."); return; }
 
   try {
     await fcaChangeNickname(api, newNick, ctx.thread.id, botId);
-
-    // Persist as the protected bot nickname for this thread
     store.botNicknames[ctx.thread.id] = newNick;
     saveStore(store);
-
-    pCtx.logger.info("Bot nickname set and protected.", {
-      threadID: ctx.thread.id,
-      by:       ctx.user.id,
-      newNick,
-    });
-
-    await ctx.reply([
-      HEADER,
-      "",
-      `✅ تم تغيير اسم البوت إلى: "${newNick}"`,
-      "⌯ الاسم محمي تلقائياً — لن يتغير بأي أمر آخر.",
-    ].join("\n"));
+    pCtx.logger.info("Bot nickname set and protected.", { threadID: ctx.thread.id, botId, newNick });
+    await ctx.reply(
+      `${HEADER}\n\n✅ تم تعيين اسم البوت وحمايته:\n"${newNick}"\n\n🔒 أي محاولة لتغييره ستُعاد تلقائياً.`
+    );
   } catch (err) {
-    pCtx.logger.warn("changeNickname (bot) failed.", { error: String(err) });
+    pCtx.logger.warn("handleBotName: changeNickname failed.", { error: String(err) });
     await ctx.reply("⚠️ فشل تغيير اسم البوت. تأكد أن البوت أدمن في القروب.");
   }
 }
 
-// /كنية [الكنية] — skips bot, restores bot nickname after bulk change
 async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
   await ctx.typingOn();
 
@@ -294,63 +278,50 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Stor
   const info = await assertGroupAdmin(ctx, api, pCtx);
   if (!info) return;
 
-  const nickname = ctx.args.slice(0).join(" ").trim();
-  if (!nickname) {
-    await ctx.reply("⚠️ الرجاء إدخال الكنية.\n مثال: /كنية 🌟 عضو");
+  const nick = ctx.args.slice(0).join(" ").trim();
+  if (!nick) {
+    await ctx.reply("⚠️ الرجاء إدخال الكنية.\n مثال: /كنية كنية");
     return;
   }
 
-  const botId     = api.getCurrentUserID();
-  const botNick   = store.botNicknames[ctx.thread.id] ?? null;
+  const botId = api.getCurrentUserID();
+  const botNick = store.botNicknames[ctx.thread.id] ?? null;
+
   const participants = info.participantIDs.filter((id) => id !== botId);
 
-  if (!participants.length) { await ctx.reply("⚠️ لا يوجد أعضاء في القروب."); return; }
+  await ctx.reply(`⏳ جارٍ تعيين الكنية لـ ${participants.length} عضو...`);
 
-  await ctx.reply(`⏳ جارٍ تعيين الكنية "${nickname}" لـ ${participants.length} عضو...`);
-
-  const threadState = getThreadState(store, ctx.thread.id);
   let ok = 0;
   let failed = 0;
+  const threadState = getThreadState(store, ctx.thread.id);
 
   for (const uid of participants) {
     try {
-      await fcaChangeNickname(api, nickname, ctx.thread.id, uid);
-      threadState.nicknames[uid] = nickname;
+      await fcaChangeNickname(api, nick, ctx.thread.id, uid);
+      threadState.nicknames[uid] = nick;
       ok++;
     } catch { failed++; }
     await sleep(1_000);
   }
 
-  // Restore protected bot nickname if set
+  // Restore bot nickname after batch
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
-      pCtx.logger.info("Bot nickname restored after bulk nick change.", {
-        threadID: ctx.thread.id,
-        botNick,
-      });
+      pCtx.logger.info("Bot nickname restored after set-nickname.", { threadID: ctx.thread.id, botNick });
     } catch { /* best effort */ }
   }
 
   saveStore(store);
-  pCtx.logger.info("Nicknames set for all members (bot skipped).", {
-    threadID: ctx.thread.id,
-    nickname,
-    ok,
-    failed,
-    botSkipped: !!botId,
-  });
+  pCtx.logger.info("Nicknames set.", { threadID: ctx.thread.id, nick, ok, failed });
 
-  const lines = [HEADER, "", `✅ تم تعيين الكنية: "${nickname}"`, `⌯ نجح: ${ok} عضو`];
+  const lines = [HEADER, "", `✅ تم تعيين الكنية: "${nick}"`, `⌯ نجح: ${ok} عضو`];
   if (failed > 0) lines.push(`⌯ فشل: ${failed} عضو`);
   if (botNick)    lines.push(`⌯ اسم البوت محمي: "${botNick}"`);
   await ctx.reply(lines.join("\n"));
 }
 
-// /حماية [اسم|كنيات]
 async function handleProtection(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
-  await ctx.typingOn();
-
   const target = ctx.getArg(0);
 
   if (target === "اسم") {
@@ -359,9 +330,9 @@ async function handleProtection(ctx: Context, pCtx: IPluginContext, store: Store
     await handleProtectNicknames(ctx, pCtx, store);
   } else {
     await ctx.reply(
-      "⚠️ الرجاء تحديد ما تريد حمايته:\n" +
-      "• /حماية اسم\n" +
-      "• /حماية كنيات"
+      `${HEADER}\n\n⚠️ حدد نوع الحماية:\n` +
+      `⌯ /حماية اسم — حماية اسم القروب\n` +
+      `⌯ /حماية كنيات — حماية كنيات الأعضاء`
     );
   }
 }
@@ -419,7 +390,6 @@ async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store:
   }
 }
 
-// /تنظيف كنيات — skips bot, restores bot nickname after clearing
 async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
   await ctx.typingOn();
 
@@ -438,7 +408,6 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: S
   const botId   = api.getCurrentUserID();
   const botNick = store.botNicknames[ctx.thread.id] ?? null;
 
-  // Skip bot from clear
   const participants = info.participantIDs.filter((id) => id !== botId);
   await ctx.reply(`⏳ جارٍ مسح الكنيات لـ ${participants.length} عضو...`);
 
@@ -453,7 +422,6 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: S
     await sleep(1_000);
   }
 
-  // Restore bot nickname after clearing
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
@@ -474,69 +442,80 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: S
   await ctx.reply(lines.join("\n"));
 }
 
-// ─── Protection background task ──────────────────────────────────────────────
+// ─── Event-driven protection handler ─────────────────────────────────────────
+//
+// Listens to raw FCA events:
+//   • log:thread-name    → if name protection is on, revert the change
+//   • log:user-nickname  → if nickname/bot-nick protection is on, restore it
+//
+// This replaces the old 5-second polling approach — reactions happen instantly.
 
-async function runProtectionTask(pCtx: IPluginContext, store: StoreData): Promise<void> {
-  const api = getApi(pCtx);
-  if (!api) return;
+function createProtectionHandler(pCtx: IPluginContext, store: StoreData) {
+  return function protectionHandler(event: FcaEvent): void {
+    if (event.type !== "event") return;
 
-  // ── Group name protection ────────────────────────────────────────────────
-  for (const [threadID, state] of Object.entries(store.threads)) {
-    if (state.protectName && state.lockedName) {
-      try {
-        const info = await fcaGetThreadInfo(api, threadID);
-        if (info.name !== state.lockedName) {
-          pCtx.logger.warn("Name protection triggered — reverting.", {
-            threadID, found: info.name, locked: state.lockedName,
+    const ge = event as FcaGroupEvent;
+    const threadID = ge.threadID;
+    if (!threadID) return;
+
+    const api = pCtx.consumeService<IMiraiService>("mirai-transport")?.getApi?.() ?? null;
+    if (!api) return;
+
+    // ── Group name changed ─────────────────────────────────────────────────
+    if (ge.logMessageType === "log:thread-name") {
+      const state = store.threads[threadID];
+      if (!state?.protectName || !state.lockedName) return;
+
+      const newName = ge.logMessageData?.name ?? "";
+      if (newName === state.lockedName) return;
+
+      pCtx.logger.warn("Name protection triggered (event) — reverting.", {
+        threadID, found: newName, locked: state.lockedName,
+      });
+
+      fcaSetTitle(api, state.lockedName, threadID).catch((err: unknown) => {
+        pCtx.logger.debug("Name protection revert failed.", { threadID, error: String(err) });
+      });
+      return;
+    }
+
+    // ── Nickname changed ───────────────────────────────────────────────────
+    if (ge.logMessageType === "log:user-nickname") {
+      const participantId = ge.logMessageData?.participant_id;
+      const newNick       = ge.logMessageData?.nickname ?? "";
+      if (!participantId) return;
+
+      const botId = api.getCurrentUserID();
+
+      // Bot nickname protection
+      if (participantId === botId) {
+        const protectedNick = store.botNicknames[threadID];
+        if (protectedNick && newNick !== protectedNick) {
+          pCtx.logger.warn("Bot nickname protection triggered (event) — restoring.", {
+            threadID, found: newNick || "(empty)", expected: protectedNick,
           });
-          await fcaSetTitle(api, state.lockedName, threadID);
-        }
-      } catch (err) {
-        pCtx.logger.debug("Name protection check failed.", { threadID, error: String(err) });
-      }
-    }
-
-    // ── Member nickname protection ─────────────────────────────────────────
-    if (state.protectNicknames && Object.keys(state.nicknames).length > 0) {
-      try {
-        const info         = await fcaGetThreadInfo(api, threadID);
-        const currentNicks = info.nicknames ?? {};
-        for (const [uid, expected] of Object.entries(state.nicknames)) {
-          const current = currentNicks[uid] ?? "";
-          if (current !== expected) {
-            pCtx.logger.info("Nickname protection triggered.", { threadID, uid });
-            await fcaChangeNickname(api, expected, threadID, uid).catch(() => { /* best effort */ });
-            await sleep(1_000);
-          }
-        }
-      } catch (err) {
-        pCtx.logger.debug("Nickname protection check failed.", { threadID, error: String(err) });
-      }
-    }
-  }
-
-  // ── Bot nickname protection (system-level) ───────────────────────────────
-  const botId = api.getCurrentUserID?.() || "";
-  if (botId && store.botNicknames && Object.keys(store.botNicknames).length > 0) {
-    for (const [threadID, protectedNick] of Object.entries(store.botNicknames)) {
-      if (!protectedNick) continue;
-      try {
-        const info          = await fcaGetThreadInfo(api, threadID);
-        const currentNicks  = info.nicknames ?? {};
-        const currentBotNick = currentNicks[botId] ?? "";
-        if (currentBotNick !== protectedNick) {
-          pCtx.logger.warn("Bot nickname protection triggered — restoring.", {
-            threadID,
-            found:    currentBotNick || "(empty)",
-            expected: protectedNick,
+          fcaChangeNickname(api, protectedNick, threadID, botId).catch((err: unknown) => {
+            pCtx.logger.debug("Bot nickname restore failed.", { error: String(err) });
           });
-          await fcaChangeNickname(api, protectedNick, threadID, botId).catch(() => { /* best effort */ });
         }
-      } catch (err) {
-        pCtx.logger.debug("Bot nickname check failed.", { threadID, error: String(err) });
+        return;
       }
+
+      // Member nickname protection
+      const state = store.threads[threadID];
+      if (!state?.protectNicknames) return;
+
+      const expected = state.nicknames[participantId];
+      if (!expected || newNick === expected) return;
+
+      pCtx.logger.info("Nickname protection triggered (event) — restoring.", {
+        threadID, uid: participantId, expected, found: newNick || "(empty)",
+      });
+      fcaChangeNickname(api, expected, threadID, participantId).catch((err: unknown) => {
+        pCtx.logger.debug("Nickname restore failed.", { error: String(err) });
+      });
     }
-  }
+  };
 }
 
 // ─── Plugin class ─────────────────────────────────────────────────────────────
@@ -544,13 +523,14 @@ async function runProtectionTask(pCtx: IPluginContext, store: StoreData): Promis
 class ManagementPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "management",
-    version:     "2.0.0",
-    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية تلقائية لكنية البوت.",
+    version:     "3.0.0",
+    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية فورية مدمجة في الأحداث.",
     author:      "Sixseven-6677",
   };
 
   private ctx!:  IPluginContext;
   private store: StoreData = { threads: {}, botNicknames: {} };
+  private protectionHandler: ((event: FcaEvent) => void) | null = null;
 
   async onLoad(ctx: IPluginContext): Promise<void> {
     this.ctx   = ctx;
@@ -636,21 +616,30 @@ class ManagementPlugin implements IPlugin {
       pCtx.logger.info(`Command "${cmd.name}" registered (aliases: ${cmd.aliases?.join(", ")}).`);
     }
 
-    // Recurring task: check name + nickname + bot nickname protection every 5s
-    pCtx.scheduleRecurring({
-      name:           "management:protection-check",
-      intervalMs:     5_000,
-      runImmediately: false,
-      fn: async () => { await runProtectionTask(pCtx, store); },
-      onError: (err) => {
-        pCtx.logger.warn("Protection task error.", { error: String(err) });
-      },
-    });
-
-    pCtx.logger.info("ManagementPlugin enabled — protection task started (5s interval).");
+    // ── Event-driven protection (replaces polling) ─────────────────────────
+    const mirai = pCtx.consumeService<IMiraiService>("mirai-transport");
+    if (mirai?.addRawEventListener) {
+      this.protectionHandler = createProtectionHandler(pCtx, store);
+      mirai.addRawEventListener(this.protectionHandler);
+      pCtx.logger.info(
+        "ManagementPlugin enabled — event-driven protection active " +
+        "(log:thread-name + log:user-nickname)."
+      );
+    } else {
+      pCtx.logger.warn(
+        "ManagementPlugin: mirai-transport not available or missing addRawEventListener. " +
+        "Protection events disabled."
+      );
+    }
   }
 
   async onDisable(): Promise<void> {
+    if (this.protectionHandler) {
+      const mirai = this.ctx.consumeService<IMiraiService>("mirai-transport");
+      mirai?.removeRawEventListener?.(this.protectionHandler);
+      this.protectionHandler = null;
+      this.ctx.logger.info("ManagementPlugin: protection handler unregistered.");
+    }
     saveStore(this.store);
     this.ctx.logger.info("ManagementPlugin disabled — store saved.");
   }
