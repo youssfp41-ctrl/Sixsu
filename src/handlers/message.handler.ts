@@ -43,7 +43,6 @@ export async function handleMessage(ctx: Context): Promise<void> {
         ? "text"
         : "empty";
 
-  // ── [DEBUG-4] Message routing decision ──────────────────────────────────
   log.info("MessageHandler: routing message.", {
     userId:          ctx.user.id,
     role:            ctx.user.role,
@@ -59,7 +58,11 @@ export async function handleMessage(ctx: Context): Promise<void> {
   }
 
   if (ctx.message.attachments.length > 0) {
-    await handleAttachment(ctx);
+    // Silently ignore attachments — no reply sent
+    log.debug("MessageHandler: attachment received — ignoring.", {
+      userId: ctx.user.id,
+      types:  ctx.message.attachments.map((a) => a.type),
+    });
     return;
   }
 
@@ -85,7 +88,6 @@ async function handleText(ctx: Context): Promise<void> {
     return;
   }
 
-  // ── [DEBUG-4b] Entering middleware chain ─────────────────────────────────
   log.info("MessageHandler: entering command pipeline.", {
     userId:      ctx.user.id,
     commandName: ctx.commandName ?? "(none)",
@@ -93,14 +95,6 @@ async function handleText(ctx: Context): Promise<void> {
   });
 
   await pipeline.run(ctx);
-}
-
-async function handleAttachment(ctx: Context): Promise<void> {
-  log.info("MessageHandler: attachment received.", {
-    userId: ctx.user.id,
-    types:  ctx.message.attachments.map((a) => a.type),
-  });
-  await ctx.reply("تم استقبال المرفق.");
 }
 
 async function handlePostback(ctx: Context): Promise<void> {
