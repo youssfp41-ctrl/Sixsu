@@ -1,4 +1,5 @@
-import path from "path";
+import path    from "path";
+import express from "express";
 import { config } from "./config/env";
 import { LoggerManager } from "./logger/LoggerManager";
 import { LogLevel } from "./logger/types/ILogger";
@@ -12,44 +13,45 @@ LoggerManager.configure({
 
 const log = LoggerManager.getLogger("Boot");
 
-import { createApp }                   from "./app";
-import { Bot }                         from "./core/Bot";
-import { FacebookConnection }          from "./facebook/FacebookConnection";
-import { FacebookClient }              from "./facebook/FacebookClient";
-import { FacebookSender }              from "./facebook/FacebookSender";
-import { CookieHttpClient }            from "./facebook/cookie/CookieHttpClient";
-import { MiraiTransport }              from "./facebook/mirai/MiraiTransport";
-import { MiraiSender }                 from "./facebook/mirai/MiraiSender";
-import { FcaEventAdapter }             from "./facebook/mirai/FcaEventAdapter";
-import { ISender }                     from "./facebook/types/ISender";
-import { FacebookEventNormalizer }     from "./facebook/FacebookEventNormalizer";
-import { FacebookGateway }             from "./facebook/FacebookGateway";
-import { CommandRegistry }             from "./commands/CommandRegistry";
-import { CommandLoader }               from "./commands/CommandLoader";
-import { CommandPipeline }             from "./commands/CommandPipeline";
-import { typingMiddleware }            from "./commands/middleware/typing.middleware";
-import { MiddlewareManager }           from "./middleware/MiddlewareManager";
-import { createLoggingMiddleware }     from "./middleware/built-in/logging.middleware";
-import { createCooldownMiddleware }    from "./middleware/built-in/cooldown.middleware";
-import { createAntiSpamMiddleware }    from "./middleware/built-in/antispam.middleware";
-import { createPermissionsMiddleware } from "./middleware/built-in/permissions.middleware";
+import { createWebhookRouter }             from "./routes/webhook.route";
+import { httpErrorHandler, notFoundHandler } from "./errors/handlers/HttpErrorHandler";
+import { Bot }                             from "./core/Bot";
+import { FacebookConnection }              from "./facebook/FacebookConnection";
+import { FacebookClient }                  from "./facebook/FacebookClient";
+import { FacebookSender }                  from "./facebook/FacebookSender";
+import { CookieHttpClient }               from "./facebook/cookie/CookieHttpClient";
+import { MiraiTransport }                  from "./facebook/mirai/MiraiTransport";
+import { MiraiSender }                     from "./facebook/mirai/MiraiSender";
+import { FcaEventAdapter }                 from "./facebook/mirai/FcaEventAdapter";
+import { ISender }                         from "./facebook/types/ISender";
+import { FacebookEventNormalizer }         from "./facebook/FacebookEventNormalizer";
+import { FacebookGateway }                 from "./facebook/FacebookGateway";
+import { CommandRegistry }                 from "./commands/CommandRegistry";
+import { CommandLoader }                   from "./commands/CommandLoader";
+import { CommandPipeline }                 from "./commands/CommandPipeline";
+import { typingMiddleware }                from "./commands/middleware/typing.middleware";
+import { MiddlewareManager }              from "./middleware/MiddlewareManager";
+import { createLoggingMiddleware }         from "./middleware/built-in/logging.middleware";
+import { createCooldownMiddleware }        from "./middleware/built-in/cooldown.middleware";
+import { createAntiSpamMiddleware }        from "./middleware/built-in/antispam.middleware";
+import { createPermissionsMiddleware }     from "./middleware/built-in/permissions.middleware";
 import {
   BanStore, BanEntry, createBannedMiddleware,
 } from "./middleware/built-in/banned.middleware";
 import { LockdownStore, createLockdownMiddleware } from "./middleware/built-in/lockdown.middleware";
-import { AdminStore }                  from "./middleware/built-in/admin-store";
-import { DatabaseManager }   from "./database/DatabaseManager";
-import { UserRepository }    from "./database/repositories/user.repository";
-import { CacheManager }      from "./cache/CacheManager";
-import { createCacheProvider } from "./cache/providers/createProvider";
-import { UserService }       from "./users/UserService";
-import { TaskScheduler }     from "./scheduler";
-import { AuthManager }       from "./facebook/auth/AuthManager";
-import { SessionManager }    from "./facebook/session/SessionManager";
-import { SessionStore }      from "./facebook/session/SessionStore";
-import { ReconnectManager }  from "./facebook/reconnect/ReconnectManager";
-import { ProcessErrorHandler } from "./errors/handlers/ProcessErrorHandler";
-import { PluginManager }     from "./plugins/PluginManager";
+import { AdminStore }                      from "./middleware/built-in/admin-store";
+import { DatabaseManager }                 from "./database/DatabaseManager";
+import { UserRepository }                  from "./database/repositories/user.repository";
+import { CacheManager }                    from "./cache/CacheManager";
+import { createCacheProvider }             from "./cache/providers/createProvider";
+import { UserService }                     from "./users/UserService";
+import { TaskScheduler }                   from "./scheduler";
+import { AuthManager }                     from "./facebook/auth/AuthManager";
+import { SessionManager }                  from "./facebook/session/SessionManager";
+import { SessionStore }                    from "./facebook/session/SessionStore";
+import { ReconnectManager }               from "./facebook/reconnect/ReconnectManager";
+import { ProcessErrorHandler }             from "./errors/handlers/ProcessErrorHandler";
+import { PluginManager }                   from "./plugins/PluginManager";
 import {
   setCommandPipeline, setCommandRegistry, setTaskScheduler,
   setReconnectManager, setBanStore, setUserService,
@@ -63,14 +65,13 @@ function buildBanMessage(entry: BanEntry): string {
   const expiry = entry.expiresAt
     ? ` ينتهي: ${entry.expiresAt.toLocaleString("ar-SA")}.`
     : "";
-  if (entry.reason?.startsWith("[MUTED]")) return `🔇 تم كتمك من التفاعل مع البوت.${expiry}`;
+  if (entry.reason?.startsWith("[MUTED]"))  return `🔇 تم كتمك من التفاعل مع البوت.${expiry}`;
   if (entry.reason?.startsWith("[KICKED]")) return `👢 تم طردك مؤقتاً.${expiry}`;
   const reason = entry.reason ? ` السبب: ${entry.reason}.` : "";
   const durStr = entry.expiresAt ? expiry : " الحظر دائم.";
   return `🚫 أنت محظور من استخدام البوت.${reason}${durStr}`;
 }
 
-/** Returns true only if MONGODB_URI is a complete, valid connection string. */
 function isValidMongoUri(uri: string): boolean {
   return (uri.startsWith("mongodb://") && uri.length > 10) ||
          (uri.startsWith("mongodb+srv://") && uri.length > 14);
@@ -78,7 +79,36 @@ function isValidMongoUri(uri: string): boolean {
 
 async function bootstrap(): Promise<void> {
 
-  // ── AppState check ────────────────────────────────────────────────────────
+  // ── 1. Start HTTP server IMMEDIATELY — so Railway healthcheck passes ────────
+  //      The /health endpoint is available before any auth or bot init.
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
+  let miraiTransportRef: MiraiTransport | null = null;
+
+  app.get(["/health", "/api/health", "/api/healthz"], (_req, res) => {
+    const mqttConnected = miraiTransportRef ? miraiTransportRef.getApi() !== null : null;
+    res.status(200).json({
+      status:    "ok",
+      uptime:    process.uptime(),
+      mqtt:      mqttConnected === null ? "initializing" : mqttConnected ? "connected" : "disconnected",
+      botUserId: miraiTransportRef?.getCurrentUserId() || null,
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const server = app.listen(config.port, () => {
+      log.info(`HTTP server listening on port ${config.port} — /health ready.`, { env: config.nodeEnv });
+      resolve();
+    });
+    server.on("error", (err: Error) => {
+      log.error("Failed to start HTTP server.", err);
+      reject(err);
+    });
+  });
+
+  // ── 2. AppState check ─────────────────────────────────────────────────────
   const appStateEnvKey = config.auth.appStateEnvKey;
   const appStateValue  = process.env[appStateEnvKey] ?? process.env["FB_APPSTATE"];
   const hasAppState    = !!(appStateValue || config.auth.appStateFile);
@@ -89,8 +119,8 @@ async function bootstrap(): Promise<void> {
       "عيّن FB_APPSTATE (base64 cookie export) لتفعيل المراسلة."
     );
   }
-  // ─────────────────────────────────────────────────────────────────────────
 
+  // ── 3. Core services ──────────────────────────────────────────────────────
   const bot = new Bot();
 
   const errorHandler = new ProcessErrorHandler();
@@ -103,7 +133,6 @@ async function bootstrap(): Promise<void> {
   const cache = new CacheManager({ provider: await createCacheProvider() });
   bot.register(cache);
 
-  // ── Database (optional) ──────────────────────────────────────────────────
   const mongoUri = config.database.mongoUri;
   if (isValidMongoUri(mongoUri)) {
     const db = new DatabaseManager();
@@ -111,10 +140,7 @@ async function bootstrap(): Promise<void> {
     log.info("Database: MongoDB enabled.");
   } else {
     if (mongoUri) {
-      log.warn(
-        `Database: MONGODB_URI looks invalid ("${mongoUri.slice(0, 20)}…") — ` +
-        "skipping MongoDB. Bot will run without persistence."
-      );
+      log.warn(`Database: MONGODB_URI looks invalid — skipping MongoDB.`);
     } else {
       log.info("Database: MONGODB_URI not set — running without persistence.");
     }
@@ -123,7 +149,7 @@ async function bootstrap(): Promise<void> {
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
 
-  // ── Auth / Session ────────────────────────────────────────────────────────
+  // ── 4. Auth / Session ─────────────────────────────────────────────────────
   const auth = new AuthManager();
 
   if (config.auth.appStateFile) {
@@ -153,24 +179,21 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(reconnect);
 
-  // ── Facebook Transport: MiraiTransport (fca-unofficial) ───────────────────
+  // ── 5. Facebook Transport ─────────────────────────────────────────────────
   let sender:         ISender;
-  let cookieClient:   CookieHttpClient  | null = null;
-  let miraiTransport: MiraiTransport    | null = null;
-  let botUserId                               = "";
+  let cookieClient:   CookieHttpClient | null = null;
+  let miraiTransport: MiraiTransport   | null = null;
+  let botUserId                              = "";
 
   const credentials = auth.getCredentials("default");
 
   if (credentials) {
     cookieClient   = new CookieHttpClient(credentials.appState);
     botUserId      = cookieClient.getUserId();
-
     miraiTransport = new MiraiTransport(credentials.appState);
     sender         = new MiraiSender(miraiTransport);
-
-    log.info("Sender: MiraiSender active (fca-unofficial via AppState).", {
-      userId: botUserId,
-    });
+    miraiTransportRef = miraiTransport; // expose to /health endpoint
+    log.info("Sender: MiraiSender active (fca-unofficial via AppState).", { userId: botUserId });
   } else if (config.facebook.pageAccessToken) {
     const connection = new FacebookConnection();
     const client     = new FacebookClient(connection);
@@ -178,7 +201,7 @@ async function bootstrap(): Promise<void> {
     connection.connect();
     log.info("Sender: FacebookSender active (Graph API).");
   } else {
-    log.warn("No sender available — running in offline/health-only mode. Set FB_APPSTATE to enable messaging.");
+    log.warn("No sender available — running in health-only mode. Set FB_APPSTATE to enable messaging.");
     sender = {
       sendText:     async () => { log.warn("NoOpSender: sendText called but no FB_APPSTATE configured."); },
       sendTyping:   async () => {},
@@ -194,17 +217,16 @@ async function bootstrap(): Promise<void> {
   const gateway     = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
 
-  // ── Owner IDs — set on context builder so role "owner" is always assigned ─
   gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
   log.info("Owner IDs configured.", { ownerIds: config.bot.ownerIds });
 
-  // ── User System ───────────────────────────────────────────────────────────
+  // ── 6. User System ────────────────────────────────────────────────────────
   const userRepo = new UserRepository();
   const userSvc  = new UserService(userRepo, cache.store("users"));
   gateway.getContextBuilder().setUserService(userSvc);
   setUserService(userSvc);
 
-  // ── Commands ──────────────────────────────────────────────────────────────
+  // ── 7. Commands ───────────────────────────────────────────────────────────
   const registry    = new CommandRegistry();
   const loader      = new CommandLoader(registry);
   const commandsDir = path.resolve(config.bot.commandsDir);
@@ -215,7 +237,6 @@ async function bootstrap(): Promise<void> {
   const banStore      = new BanStore();
   const lockdownStore = new LockdownStore();
 
-  // ── Admin Store — seeds from BOT_ADMIN_IDS, persists changes to disk ──────
   const adminStore = new AdminStore(config.bot.adminIds);
   log.info("AdminStore ready.", { adminCount: adminStore.size() });
 
@@ -225,10 +246,7 @@ async function bootstrap(): Promise<void> {
     .register(createLoggingMiddleware({ logEntry: true }))
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
-    .register(createPermissionsMiddleware({
-      adminIds:   config.bot.adminIds,
-      adminStore,
-    }));
+    .register(createPermissionsMiddleware({ adminIds: config.bot.adminIds, adminStore }));
 
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
     .use(mwManager.fn("banned"))
@@ -248,7 +266,7 @@ async function bootstrap(): Promise<void> {
   setReconnectManager(reconnect);
   setBanStore(banStore);
 
-  // ── Plugin System ─────────────────────────────────────────────────────────
+  // ── 8. Plugin System ──────────────────────────────────────────────────────
   const pluginManager = new PluginManager({
     commandRegistry: registry,
     scheduler,
@@ -257,12 +275,12 @@ async function bootstrap(): Promise<void> {
   });
 
   const svcReg = pluginManager.getServiceRegistry();
-  svcReg.provide("command-registry", registry,  "core");
-  svcReg.provide("facebook-sender",  sender,    "core");
-  svcReg.provide("ban-store",        banStore,       "core");
-  svcReg.provide("lockdown-store",   lockdownStore,  "core");
-  svcReg.provide("admin-store",      adminStore,     "core");
-  svcReg.provide("user-service",     userSvc,   "core");
+  svcReg.provide("command-registry", registry,      "core");
+  svcReg.provide("facebook-sender",  sender,         "core");
+  svcReg.provide("ban-store",        banStore,        "core");
+  svcReg.provide("lockdown-store",   lockdownStore,   "core");
+  svcReg.provide("admin-store",      adminStore,      "core");
+  svcReg.provide("user-service",     userSvc,         "core");
 
   if (cookieClient) {
     svcReg.provide("fb-cookie-client", cookieClient, "core");
@@ -279,7 +297,7 @@ async function bootstrap(): Promise<void> {
     log.info("Core service registered: mirai-transport.");
   }
 
-  // ── MiraiTransport: FCA event listener → Adapter → Pipeline ───────────────
+  // ── 9. MiraiTransport event listener ─────────────────────────────────────
   if (miraiTransport) {
     const adapter = new FcaEventAdapter(botUserId);
 
@@ -306,38 +324,25 @@ async function bootstrap(): Promise<void> {
     });
 
     bot.register(miraiTransport);
-
-    log.info("MiraiTransport registered — fca-unofficial MQTT listener active.", {
-      userId: botUserId,
-    });
+    log.info("MiraiTransport registered — fca-unofficial MQTT listener active.", { userId: botUserId });
   }
 
   bot.register(pluginManager);
 
-  // ── Express server ────────────────────────────────────────────────────────
-  const app = createApp(
-    gateway,
-    {
-      onMemberJoined: handleMemberJoined,
-      onMemberLeft:   handleMemberLeft,
-    },
-    miraiTransport,
-  );
-
-  await new Promise<void>((resolve, reject) => {
-    const server = app.listen(config.port, () => {
-      log.info(`Server listening on port ${config.port}`, { env: config.nodeEnv });
-      resolve();
-    });
-    server.on("error", (err: Error) => {
-      log.error("Failed to start server.", err);
-      reject(err);
-    });
+  // ── 10. Add webhook routes to the already-running express app ─────────────
+  const webhookRouter = createWebhookRouter(gateway, {
+    onMemberJoined: handleMemberJoined,
+    onMemberLeft:   handleMemberLeft,
   });
+  app.use("/webhook", webhookRouter);
+  app.use(notFoundHandler);
+  app.use(httpErrorHandler);
 
+  log.info("All routes registered on running HTTP server.");
+
+  // ── 11. Start bot subsystems ──────────────────────────────────────────────
   await bot.start();
 
-  // Delayed status report — fires 15 s after startup so Railway captures it.
   setTimeout(() => {
     const mqttConnected = miraiTransport ? miraiTransport.getApi() !== null : false;
     log.info("── BOT STATUS REPORT (15s) ──────────────────────────────────", {
