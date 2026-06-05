@@ -53,29 +53,56 @@ for (const filePath of allTargets) {
   console.log('[patch-fca]', path.basename(filePath), '— av fix applied (' + bugCount + ' fixed, ' + fixedCount + ' already fixed).');
 }
 
-// ── Fix 2: buildAPI null-check bug in fca-unofficial-fixed/index.js ──────────
-// Bug:  `if (userCookie.length === 0 && tiktikCookie.length === 0) {`
-//       crashes with TypeError "Cannot read properties of undefined (reading
-//       'length')" when the c_user cookie is absent because the appState is
-//       expired or invalid. The code reads .length before checking for undefined.
-// Fix:  swap to proper null-guard so we fail cleanly instead of crashing with
-//       a cryptic TypeError. The subsequent else-if becomes dead code but is
-//       harmless (it was already the correct check).
+// ── Fix 2: buildAPI null-check + error propagation in fca-unofficial-fixed ────
+// Bug A: `if (userCookie.length === 0 && ...)` crashes with TypeError
+//         "Cannot read properties of undefined (reading 'length')" when the
+//         c_user/i_user cookies are absent (expired or invalid appState).
+// Bug B: `return log.error('login', "...")` silently returns undefined instead
+//         of propagating the error to the caller — MiraiTransport never sees a
+//         meaningful error message and retries pointlessly.
+// Bug C: checkpoint detection also uses return-log-error, same issue.
+//
+// Fix:  Replace with proper null-guard + throw so the error propagates through
+//       the promise chain to MiraiTransport's callback. MiraiTransport then
+//       detects "appstate die" / "cookie not found" and stops retrying with a
+//       clear "please refresh FB_APPSTATE" message in the logs.
 if (fs.existsSync(indexPath1)) {
   let content = fs.readFileSync(indexPath1, 'utf8');
+  let changed = false;
 
-  const BUILDAPI_BUG = 'if (userCookie.length === 0 && tiktikCookie.length === 0) {';
-  const BUILDAPI_FIX = 'if (!userCookie && !tiktikCookie) {';
-
-  if (content.includes(BUILDAPI_BUG)) {
-    const patched = content.split(BUILDAPI_BUG).join(BUILDAPI_FIX);
-    fs.writeFileSync(indexPath1, patched);
-    console.log('[patch-fca] index.js — buildAPI null-check fix applied (prevents TypeError when appState expired).');
-  } else if (content.includes(BUILDAPI_FIX)) {
+  // Fix A: swap buggy length check to proper null-guard
+  const NULL_BUG = 'if (userCookie.length === 0 && tiktikCookie.length === 0) {';
+  const NULL_FIX = 'if (!userCookie && !tiktikCookie) {';
+  if (content.includes(NULL_BUG)) {
+    content = content.split(NULL_BUG).join(NULL_FIX);
+    changed = true;
+    console.log('[patch-fca] index.js — buildAPI null-check fix applied.');
+  } else if (content.includes(NULL_FIX)) {
     console.log('[patch-fca] index.js — buildAPI null-check already fixed.');
   } else {
-    console.log('[patch-fca] index.js — buildAPI null-check pattern not found (different version?).');
+    console.log('[patch-fca] index.js — buildAPI null-check pattern not found (different version).');
   }
+
+  // Fix B: replace silent return-log-error with throw for "cookie not found"
+  const RET_NOTFOUND_BUG = 'return log.error(\'login\', "Không tìm thấy cookie cho người dùng, vui lòng kiểm tra lại thông tin đăng nhập")';
+  const RET_NOTFOUND_FIX = 'throw new Error("FB_APPSTATE expired: c_user/i_user cookie not found — please refresh FB_APPSTATE.")';
+  const notFoundCount = content.split(RET_NOTFOUND_BUG).length - 1;
+  if (notFoundCount > 0) {
+    content = content.split(RET_NOTFOUND_BUG).join(RET_NOTFOUND_FIX);
+    changed = true;
+    console.log('[patch-fca] index.js — buildAPI cookie-not-found throw fix applied (' + notFoundCount + ' occurrence(s)).');
+  }
+
+  // Fix C: replace silent return-log-error with throw for checkpoint page
+  const RET_CHECKPOINT_BUG = 'return log.error(\'login\', "Appstate die, vui lòng thay cái mới!", \'error\');';
+  const RET_CHECKPOINT_FIX = 'throw new Error("Appstate die: Facebook returned a checkpoint/blocked page — please refresh FB_APPSTATE.");';
+  if (content.includes(RET_CHECKPOINT_BUG)) {
+    content = content.split(RET_CHECKPOINT_BUG).join(RET_CHECKPOINT_FIX);
+    changed = true;
+    console.log('[patch-fca] index.js — buildAPI checkpoint throw fix applied.');
+  }
+
+  if (changed) fs.writeFileSync(indexPath1, content);
 }
 
 console.log('[patch-fca] Done.');
