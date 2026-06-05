@@ -39,12 +39,9 @@ function isSessionExpiredError(msg: string): boolean {
  * Uses fca-unofficial (proven in Fang / isoy-fca 1.3.10) as a Facebook
  * MQTT transport.
  *
- * autoReconnect: true → fca-unofficial handles transient MQTT drops
- * internally; our listen() callback fires only for real events or fatal
- * session errors (e.g. error 1357004 "Not logged in").
- *
- * On fatal error the transport stops retrying and logs a clear message
- * asking the operator to refresh the AppState.
+ * Supports multiple raw event listeners via addRawEventListener —
+ * plugins can subscribe to FCA events (e.g. log:thread-name, log:user-nickname)
+ * without replacing the main event handler.
  */
 export class MiraiTransport implements ISystem {
   readonly name = "mirai-transport";
@@ -53,6 +50,8 @@ export class MiraiTransport implements ISystem {
   private api:              FcaApi | null       = null;
   private stopListenFn:     (() => void) | null  = null;
   private eventHandler:     FcaEventHandler | null = null;
+  /** Additional raw event listeners (e.g. from plugins). Called after the main handler. */
+  private rawListeners:     FcaEventHandler[]    = [];
   private running           = false;
   private reconnectTimer:   ReturnType<typeof setTimeout> | null = null;
   private loginAttempts     = 0;
@@ -82,6 +81,23 @@ export class MiraiTransport implements ISystem {
     this.eventHandler = handler;
   }
 
+  /**
+   * Register an additional raw FCA event listener.
+   * Useful for plugins that need to react to events like log:thread-name or
+   * log:user-nickname without replacing the main pipeline handler.
+   * Listeners are called after the main eventHandler, each in its own try/catch.
+   */
+  addRawEventListener(fn: FcaEventHandler): void {
+    if (!this.rawListeners.includes(fn)) {
+      this.rawListeners.push(fn);
+    }
+  }
+
+  /** Remove a previously registered raw listener. */
+  removeRawEventListener(fn: FcaEventHandler): void {
+    this.rawListeners = this.rawListeners.filter(l => l !== fn);
+  }
+
   getApi(): FcaApi | null         { return this.api; }
   getCurrentUserId(): string      { return this.api?.getCurrentUserID() ?? ""; }
   getAppState(): FcaCookie[]      { return this.api?.getAppState() ?? this.appState; }
@@ -99,18 +115,12 @@ export class MiraiTransport implements ISystem {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.stopListening();
     if (this.api) { try { this.api.logout(); } catch { /**/ } this.api = null; }
+    this.rawListeners = [];
     log.info("MiraiTransport: destroyed.");
   }
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  /**
-   * Extract the Facebook user ID from the AppState cookies.
-   * The `c_user` cookie holds the user's numeric Facebook ID.
-   * We need this BEFORE calling fcaLogin so we can pass pageID= at login
-   * time — ensuring the MQTT syncToken GraphQL request uses a valid `av`
-   * param from the very first request (not just after listen() starts).
-   */
   private getUserIdFromAppState(): string {
     const cookie = this.appState.find(c => c.key === "c_user");
     return cookie?.value ? String(cookie.value) : "";
@@ -118,9 +128,6 @@ export class MiraiTransport implements ISystem {
 
   private doLogin(): Promise<void> {
     return new Promise<void>((resolve) => {
-      // Fix: pass pageID at login time so ctx.globalOptions.pageID is set
-      // before any MQTT syncToken requests fire. Without this, the `av` param
-      // in those requests is undefined → no messages received via MQTT.
       const earlyPageId = this.getUserIdFromAppState();
 
       log.info("MiraiTransport: logging in via fca-unofficial…", {
@@ -163,7 +170,6 @@ export class MiraiTransport implements ISystem {
         }
 
         this.api = api;
-        // Also set via setOptions as a belt-and-suspenders fallback.
         api.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
         log.info("MiraiTransport: logged in successfully.", {
@@ -229,6 +235,7 @@ export class MiraiTransport implements ISystem {
 
       log.info("MiraiTransport: raw event received.", { type: event.type });
 
+      // ── Main pipeline handler ────────────────────────────────────────────
       try {
         this.eventHandler?.(event);
       } catch (handlerErr: unknown) {
@@ -236,6 +243,17 @@ export class MiraiTransport implements ISystem {
           eventType: (event as Record<string, unknown>).type,
           error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
         });
+      }
+
+      // ── Additional raw listeners (e.g. management plugin protection) ─────
+      for (const listener of this.rawListeners) {
+        try {
+          listener(event);
+        } catch (listenerErr: unknown) {
+          log.warn("MiraiTransport: raw listener threw.", {
+            error: listenerErr instanceof Error ? listenerErr.message : String(listenerErr),
+          });
+        }
       }
     });
 
