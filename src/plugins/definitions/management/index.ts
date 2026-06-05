@@ -284,7 +284,7 @@ async function handleSetNickname(
     } catch {
       failed++;
     }
-    await sleep(250); // avoid rate limit
+    await sleep(1_000); // avoid rate limit
   }
 
   saveStore(store);
@@ -434,7 +434,7 @@ async function handleClearNicknames(
     } catch {
       failed++;
     }
-    await sleep(250);
+    await sleep(1_000);
   }
 
   // Clear stored state
@@ -523,7 +523,7 @@ async function runProtectionTask(
           if (current !== expected) {
             pCtx.logger.info("Nickname protection triggered.", { threadID, uid });
             await fcaChangeNickname(api, expected, threadID, uid).catch(() => { /* best effort */ });
-            await sleep(200);
+            await sleep(1_000);
           }
         }
       } catch (err) {
@@ -602,7 +602,7 @@ class ManagementPlugin implements IPlugin {
     // Recurring task: check name + nickname protection every 60 seconds
     pCtx.scheduleRecurring({
       name:           "management:protection-check",
-      intervalMs:     60_000,
+      intervalMs:     5_000,
       runImmediately: false,
       fn: async () => {
         await runProtectionTask(pCtx, store);
