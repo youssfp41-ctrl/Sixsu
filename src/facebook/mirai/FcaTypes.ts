@@ -32,7 +32,7 @@ export interface FcaMessageEvent {
   messageReply?: FcaMessageEvent;
 }
 
-/** A group action event (subscribe / unsubscribe / rename etc.) from FCA. */
+/** A group action event (subscribe / unsubscribe / rename / nickname etc.) from FCA. */
 export interface FcaGroupEvent {
   type: "event";
   senderID: string;
@@ -42,7 +42,12 @@ export interface FcaGroupEvent {
   logMessageData: {
     addedParticipants?: Array<{ userFbId: string; name?: string }>;
     leftParticipantFbId?: string;
+    /** log:thread-name — the new group name */
     name?: string;
+    /** log:user-nickname — the target user's Facebook ID */
+    participant_id?: string;
+    /** log:user-nickname — the new nickname (empty string = cleared) */
+    nickname?: string;
   };
   logMessageBody: string;
   author: string;
