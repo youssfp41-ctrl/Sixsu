@@ -6,7 +6,7 @@ const log = LoggerManager.getLogger("MiraiTransport");
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 const fcaLogin = require("@dongdev/fca-unofficial") as (
-  options:  { appState: FcaCookie[] },
+  options:  { appState: FcaCookie[]; pageID?: string },
   callback: (err: Error | null, api: FcaApi | null) => void,
 ) => void;
 
@@ -104,16 +104,38 @@ export class MiraiTransport implements ISystem {
 
   // ── Private ───────────────────────────────────────────────────────────────
 
+  /**
+   * Extract the Facebook user ID from the AppState cookies.
+   * The `c_user` cookie holds the user's numeric Facebook ID.
+   * We need this BEFORE calling fcaLogin so we can pass pageID= at login
+   * time — ensuring the MQTT syncToken GraphQL request uses a valid `av`
+   * param from the very first request (not just after listen() starts).
+   */
+  private getUserIdFromAppState(): string {
+    const cookie = this.appState.find(c => c.key === "c_user");
+    return cookie?.value ? String(cookie.value) : "";
+  }
+
   private doLogin(): Promise<void> {
     return new Promise<void>((resolve) => {
+      // Fix: pass pageID at login time so ctx.globalOptions.pageID is set
+      // before any MQTT syncToken requests fire. Without this, the `av` param
+      // in those requests is undefined → no messages received via MQTT.
+      const earlyPageId = this.getUserIdFromAppState();
+
       log.info("MiraiTransport: logging in via fca-unofficial…", {
-        attempt: this.loginAttempts + 1,
+        attempt:     this.loginAttempts + 1,
+        earlyPageId: earlyPageId || "(not found in AppState)",
       });
 
       let resolved = false;
 
-      fcaLogin({ appState: this.appState }, (err, api) => {
-        // Guard against fca-unofficial-fixed calling callback twice
+      const loginOptions: { appState: FcaCookie[]; pageID?: string } = {
+        appState: this.appState,
+        ...(earlyPageId ? { pageID: earlyPageId } : {}),
+      };
+
+      fcaLogin(loginOptions, (err, api) => {
         if (resolved) return;
 
         if (err || !api) {
@@ -121,7 +143,6 @@ export class MiraiTransport implements ISystem {
             ? err.message
             : (err != null ? JSON.stringify(err) : "null API returned");
 
-          // Detect permanent session expiry — no point retrying
           if (isSessionExpiredError(errMsg)) {
             log.error(
               "MiraiTransport: FB_APPSTATE is expired or invalid — stopping all retries." +
@@ -142,10 +163,7 @@ export class MiraiTransport implements ISystem {
         }
 
         this.api = api;
-        // Fix: fca-unofficial uses `av: ctx.globalOptions.pageID`
-        // in MQTT syncToken GraphQL requests. For non-Page bots, pageID is
-        // undefined which causes the request to fail → no messages received.
-        // Setting pageID = userID provides a valid av value.
+        // Also set via setOptions as a belt-and-suspenders fallback.
         api.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
         log.info("MiraiTransport: logged in successfully.", {
@@ -211,7 +229,6 @@ export class MiraiTransport implements ISystem {
 
       log.info("MiraiTransport: raw event received.", { type: event.type });
 
-      // Wrap in try-catch so a bug in the event handler never kills the listener.
       try {
         this.eventHandler?.(event);
       } catch (handlerErr: unknown) {
