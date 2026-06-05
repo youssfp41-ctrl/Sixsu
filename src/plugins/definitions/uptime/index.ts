@@ -53,7 +53,8 @@ const uptimeCommand: ICommand = {
   async execute(ctx: Context): Promise<void> {
     await ctx.typingOn();
 
-    const start = Date.now();
+    // Measure ping BEFORE getCpuUsage (which blocks 100ms)
+    const pingStart = Date.now();
 
     // Gather system info
     const uptimeSec   = process.uptime();
@@ -65,10 +66,14 @@ const uptimeCommand: ICommand = {
     const cpuModel    = os.cpus()[0]?.model?.trim() ?? "Unknown";
     const nodeVersion = process.version;
     const platform    = `${os.type()} ${os.release()}`;
-    const cpuPct      = await getCpuUsage();
-    const ping        = Date.now() - start;
 
-    const rss     = formatBytes(memUsage.rss);
+    // Record ping before the CPU sampling delay
+    const ping = Date.now() - pingStart;
+
+    // CPU usage sample (takes ~100ms internally — measured separately)
+    const cpuPct = await getCpuUsage();
+
+    const rss      = formatBytes(memUsage.rss);
     const heapUsed = formatBytes(memUsage.heapUsed);
     const heapTotal = formatBytes(memUsage.heapTotal);
 
