@@ -36,6 +36,7 @@ import { createPermissionsMiddleware } from "./middleware/built-in/permissions.m
 import {
   BanStore, BanEntry, createBannedMiddleware,
 } from "./middleware/built-in/banned.middleware";
+import { LockdownStore, createLockdownMiddleware } from "./middleware/built-in/lockdown.middleware";
 import { DatabaseManager }   from "./database/DatabaseManager";
 import { UserRepository }    from "./database/repositories/user.repository";
 import { CacheManager }      from "./cache/CacheManager";
@@ -208,10 +209,12 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
-  const banStore = new BanStore();
+  const banStore     = new BanStore();
+  const lockdownStore = new LockdownStore();
 
   const mwManager = new MiddlewareManager()
     .register(createBannedMiddleware({ store: banStore, message: buildBanMessage }))
+    .register(createLockdownMiddleware({ store: lockdownStore }))
     .register(createLoggingMiddleware({ logEntry: true }))
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
@@ -220,6 +223,7 @@ async function bootstrap(): Promise<void> {
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
     .use(mwManager.fn("banned"))
     .use(mwManager.fn("logging"))
+    .use(mwManager.fn("lockdown"))
     .use(mwManager.fn("antispam"))
     .use(mwManager.fn("cooldown"))
     .use(mwManager.fn("permissions"))
@@ -245,7 +249,8 @@ async function bootstrap(): Promise<void> {
   const svcReg = pluginManager.getServiceRegistry();
   svcReg.provide("command-registry", registry,  "core");
   svcReg.provide("facebook-sender",  sender,    "core");
-  svcReg.provide("ban-store",        banStore,  "core");
+  svcReg.provide("ban-store",        banStore,       "core");
+  svcReg.provide("lockdown-store",   lockdownStore,  "core");
   svcReg.provide("user-service",     userSvc,   "core");
 
   if (cookieClient) {
