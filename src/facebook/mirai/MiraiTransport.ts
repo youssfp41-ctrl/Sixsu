@@ -109,7 +109,11 @@ export class MiraiTransport implements ISystem {
         }
 
         this.api = api;
-        api.setOptions(MiraiTransport.FCA_OPTIONS);
+        // Fix: @dongdev/fca-unofficial uses `av: ctx.globalOptions.pageID`
+        // in MQTT syncToken GraphQL requests. For non-Page bots, pageID is
+        // undefined which causes the request to fail → no messages received.
+        // Setting pageID = userID provides a valid av value.
+        api.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
         log.info("MiraiTransport: logged in successfully.", {
           userId: api.getCurrentUserID(),
