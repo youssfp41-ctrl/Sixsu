@@ -37,6 +37,7 @@ import {
   BanStore, BanEntry, createBannedMiddleware,
 } from "./middleware/built-in/banned.middleware";
 import { LockdownStore, createLockdownMiddleware } from "./middleware/built-in/lockdown.middleware";
+import { AdminStore }                  from "./middleware/built-in/admin-store";
 import { DatabaseManager }   from "./database/DatabaseManager";
 import { UserRepository }    from "./database/repositories/user.repository";
 import { CacheManager }      from "./cache/CacheManager";
@@ -103,8 +104,6 @@ async function bootstrap(): Promise<void> {
   bot.register(cache);
 
   // ── Database (optional) ──────────────────────────────────────────────────
-  // Only register the DB system when MONGODB_URI is a complete, valid URI.
-  // An empty string or a bare "mongodb://" prefix is treated as "no DB".
   const mongoUri = config.database.mongoUri;
   if (isValidMongoUri(mongoUri)) {
     const db = new DatabaseManager();
@@ -195,6 +194,10 @@ async function bootstrap(): Promise<void> {
   const gateway     = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
 
+  // ── Owner IDs — set on context builder so role "owner" is always assigned ─
+  gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
+  log.info("Owner IDs configured.", { ownerIds: config.bot.ownerIds });
+
   // ── User System ───────────────────────────────────────────────────────────
   const userRepo = new UserRepository();
   const userSvc  = new UserService(userRepo, cache.store("users"));
@@ -209,8 +212,12 @@ async function bootstrap(): Promise<void> {
   await loader.load(commandsDir);
   loader.watch(commandsDir);
 
-  const banStore     = new BanStore();
+  const banStore      = new BanStore();
   const lockdownStore = new LockdownStore();
+
+  // ── Admin Store — seeds from BOT_ADMIN_IDS, persists changes to disk ──────
+  const adminStore = new AdminStore(config.bot.adminIds);
+  log.info("AdminStore ready.", { adminCount: adminStore.size() });
 
   const mwManager = new MiddlewareManager()
     .register(createBannedMiddleware({ store: banStore, message: buildBanMessage }))
@@ -218,7 +225,10 @@ async function bootstrap(): Promise<void> {
     .register(createLoggingMiddleware({ logEntry: true }))
     .register(createAntiSpamMiddleware({ maxMessages: 5, windowMs: 10_000 }))
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
-    .register(createPermissionsMiddleware({ adminIds: config.bot.adminIds }));
+    .register(createPermissionsMiddleware({
+      adminIds:   config.bot.adminIds,
+      adminStore,
+    }));
 
   const pipeline = new CommandPipeline(registry, config.bot.prefix)
     .use(mwManager.fn("banned"))
@@ -251,6 +261,7 @@ async function bootstrap(): Promise<void> {
   svcReg.provide("facebook-sender",  sender,    "core");
   svcReg.provide("ban-store",        banStore,       "core");
   svcReg.provide("lockdown-store",   lockdownStore,  "core");
+  svcReg.provide("admin-store",      adminStore,     "core");
   svcReg.provide("user-service",     userSvc,   "core");
 
   if (cookieClient) {
@@ -348,4 +359,3 @@ bootstrap().catch((err: unknown) => {
   log.error("Fatal error during startup.", err);
   process.exit(1);
 });
-
