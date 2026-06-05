@@ -258,6 +258,11 @@ async function bootstrap(): Promise<void> {
     log.info("Core service registered: fb-access-token.");
   }
 
+  if (miraiTransport) {
+    svcReg.provide("mirai-transport", miraiTransport, "core");
+    log.info("Core service registered: mirai-transport.");
+  }
+
   // ── MiraiTransport: FCA event listener → Adapter → Pipeline ───────────────
   if (miraiTransport) {
     const adapter = new FcaEventAdapter(botUserId);
