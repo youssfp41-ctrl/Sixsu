@@ -29,6 +29,7 @@ const FALLBACK_USER = (id: string): ContextUser => ({
 export class ContextBuilder {
   private readonly sender: ISender;
   private userService?: IUserService;
+  private ownerIds: Set<string> = new Set();
 
   constructor(sender: ISender, userService?: IUserService) {
     this.sender      = sender;
@@ -38,6 +39,12 @@ export class ContextBuilder {
   /** Inject (or replace) the UserService after construction. */
   setUserService(svc: IUserService): void {
     this.userService = svc;
+  }
+
+  /** Set the owner IDs — these users always get role "owner" regardless of DB. */
+  setOwnerIds(ids: string[]): void {
+    this.ownerIds = new Set(ids);
+    log.info(`ContextBuilder: ownerIds set — ${ids.length} owner(s).`);
   }
 
   /**
@@ -110,6 +117,13 @@ export class ContextBuilder {
       log.debug("No UserService injected — using fallback user.", {
         fbId: userLookupId,
       });
+    }
+
+    // ── Owner override ────────────────────────────────────────────────────
+    // If the user's ID is in ownerIds, force role to "owner" regardless of DB.
+    if (this.ownerIds.has(userLookupId) && user.role !== "owner") {
+      log.debug(`ContextBuilder: user ${userLookupId} is an owner — overriding role.`);
+      user = { ...user, role: "owner" };
     }
 
     const totalMs = Date.now() - buildStart;
