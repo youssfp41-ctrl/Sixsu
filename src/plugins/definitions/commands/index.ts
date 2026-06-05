@@ -14,10 +14,12 @@ interface ICommandRegistry {
 // ─── Category labels (Arabic) ────────────────────────────────────────────────
 
 const CATEGORY_LABELS: Record<string, string> = {
-  util:    "أدوات",
-  admin:   "إدارة",
-  general: "عام",
-  debug:   "تشخيص",
+  util:       "أدوات",
+  admin:      "إدارة",
+  general:    "عام",
+  debug:      "تشخيص",
+  automation: "تلقائي",
+  moderation: "مراقبة",
 };
 
 function categoryLabel(cat: string): string {
@@ -35,8 +37,8 @@ function buildCommandList(
 ): string {
   const lines: string[] = [HEADER, "", `⌯ البادئة الحالية: ${prefix}`, ""];
 
-  // Sort categories: util first, then admin (only if user is admin), then rest
-  const categoryOrder = ["util", "general", "admin", "debug"];
+  // Sort categories: util first, then automation, moderation, admin, then rest
+  const categoryOrder = ["util", "general", "automation", "moderation", "admin", "debug"];
   const sortedCats = [...byCategory.keys()].sort((a, b) => {
     const ia = categoryOrder.indexOf(a);
     const ib = categoryOrder.indexOf(b);
@@ -106,8 +108,6 @@ function makeCommand(pCtx: IPluginContext): ICommand {
       }
 
       // ── Resolve prefix ─────────────────────────────────────────────────
-      // The system uses a global prefix from config (BOT_PREFIX env var, default "/").
-      // There is no per-group prefix stored in the DB.
       const prefix = config.bot.prefix || "/";
 
       // ── Determine user role ────────────────────────────────────────────
