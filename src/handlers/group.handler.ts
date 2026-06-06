@@ -1,22 +1,50 @@
 import { ISender }            from "../facebook/types/ISender";
 import { FBMemberJoinedEvent,
-         FBMemberLeftEvent }  from "../facebook/types/events";
+         FBMemberLeftEvent,
+         FBNameChangedEvent,
+         FBNicknameChangedEvent } from "../facebook/types/events";
 import { config }             from "../config/env";
+import { getProtectionStore } from "../protection/ProtectionRegistry";
 import { LoggerManager }      from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("GroupHandler");
 
+// ── FCA API interface (subset needed for protection) ───────────────────────
+
+interface IFcaProtectionApi {
+  getCurrentUserID(): string;
+  setTitle(
+    newTitle:  string,
+    threadID:  string,
+    callback:  (err: Error | null) => void,
+  ): void;
+  changeNickname(
+    nickname:      string,
+    threadID:      string,
+    participantID: string,
+    callback?:     (err: Error | null) => void,
+  ): void;
+}
+
+// ── Singleton references ───────────────────────────────────────────────────
+
 let _sender:    ISender | undefined;
 let _botUserId: string  = "";
+let _apiGetter: (() => IFcaProtectionApi | null) | null = null;
 
-export function setGroupSender(s: ISender):    void { _sender    = s; }
-export function setGroupBotUserId(id: string): void { _botUserId = id; }
+export function setGroupSender(s: ISender):                          void { _sender    = s; }
+export function setGroupBotUserId(id: string):                       void { _botUserId = id; }
+export function setGroupApiGetter(g: () => IFcaProtectionApi | null): void { _apiGetter = g; }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function getSender(): ISender {
   if (!_sender) throw new Error("GroupHandler: sender not wired.");
   return _sender;
+}
+
+function getFcaApi(): IFcaProtectionApi | null {
+  return _apiGetter?.() ?? null;
 }
 
 function buildJoinMessage(memberIds: string[], addedByUserId: string): string {
@@ -51,7 +79,6 @@ function buildLeaveMessage(memberIds: string[], removedBySelf: boolean): string 
     : `🚪 تم إزالة عدة أعضاء من المجموعة:\n${list}`;
 }
 
-/** Notify all admin IDs that the bot was added to a new group. */
 async function notifyAdminBotAdded(
   sender:   ISender,
   threadId: string,
@@ -84,7 +111,7 @@ async function notifyAdminBotAdded(
   }
 }
 
-// ── Handlers ───────────────────────────────────────────────────────────────
+// ── Public handlers ────────────────────────────────────────────────────────
 
 export async function handleMemberJoined(event: FBMemberJoinedEvent): Promise<void> {
   if (event.members.length === 0) {
@@ -102,7 +129,6 @@ export async function handleMemberJoined(event: FBMemberJoinedEvent): Promise<vo
 
   const sender = getSender();
 
-  // ── Detect if the bot itself was added to this group ──────────────────
   const botWasAdded = !!_botUserId && event.members.includes(_botUserId);
 
   if (botWasAdded) {
@@ -111,18 +137,15 @@ export async function handleMemberJoined(event: FBMemberJoinedEvent): Promise<vo
       adminIds: config.bot.adminIds,
     });
 
-    // 1. Send welcome message inside the group
     await sender.sendText(
       event.senderId,
       `مرحباً! أنا Sixsu 🤖\nتم إضافتي بنجاح إلى هذه المجموعة.\nاكتب /help لمعرفة الأوامر المتاحة.`,
     );
 
-    // 2. Notify admin privately
     await notifyAdminBotAdded(sender, event.senderId);
     return;
   }
 
-  // ── Regular member join ───────────────────────────────────────────────
   const text = buildJoinMessage(event.members, event.addedByUserId);
   await sender.sendText(event.senderId, text);
 }
@@ -145,4 +168,127 @@ export async function handleMemberLeft(event: FBMemberLeftEvent): Promise<void> 
   const text          = buildLeaveMessage(event.members, removedBySelf);
 
   await sender.sendText(event.senderId, text);
+}
+
+// ── Protection handlers ────────────────────────────────────────────────────
+
+export async function handleNameChanged(event: FBNameChangedEvent): Promise<void> {
+  const store = getProtectionStore();
+  const state = store.threads[event.threadId];
+
+  if (!state?.protectName || !state.lockedName) return;
+  if (event.newName === state.lockedName) return;
+
+  const api = getFcaApi();
+  if (!api) {
+    log.warn("GroupHandler: name_changed — protection active but FCA API unavailable.", {
+      threadId: event.threadId,
+    });
+    return;
+  }
+
+  log.warn("GroupHandler: name_changed — reverting to locked name.", {
+    threadId:   event.threadId,
+    unwanted:   event.newName,
+    lockedName: state.lockedName,
+    changedBy:  event.changedBy,
+  });
+
+  await new Promise<void>((resolve) => {
+    api.setTitle(state.lockedName, event.threadId, (err) => {
+      if (err) {
+        log.warn("GroupHandler: name revert failed.", {
+          threadId: event.threadId,
+          error:    err.message,
+        });
+      } else {
+        log.info("GroupHandler: name reverted successfully.", {
+          threadId:   event.threadId,
+          lockedName: state.lockedName,
+        });
+      }
+      resolve();
+    });
+  });
+}
+
+export async function handleNicknameChanged(event: FBNicknameChangedEvent): Promise<void> {
+  const store = getProtectionStore();
+  const api   = getFcaApi();
+
+  if (!api) {
+    log.warn("GroupHandler: nickname_changed — FCA API unavailable.", {
+      threadId: event.threadId,
+    });
+    return;
+  }
+
+  const botId = api.getCurrentUserID();
+
+  // ── Bot nickname protection ──────────────────────────────────────────────
+  if (event.participantId === botId) {
+    const protectedNick = store.botNicknames[event.threadId];
+    if (!protectedNick) return;
+    if (event.newNickname === protectedNick) return;
+
+    log.warn("GroupHandler: bot nickname changed — restoring protected nick.", {
+      threadId:      event.threadId,
+      unwanted:      event.newNickname || "(cleared)",
+      protectedNick,
+      changedBy:     event.changedBy,
+    });
+
+    await new Promise<void>((resolve) => {
+      api.changeNickname(protectedNick, event.threadId, botId, (err) => {
+        if (err) {
+          log.warn("GroupHandler: bot nickname restore failed.", {
+            threadId: event.threadId,
+            error:    err.message,
+          });
+        } else {
+          log.info("GroupHandler: bot nickname restored.", {
+            threadId:      event.threadId,
+            protectedNick,
+          });
+        }
+        resolve();
+      });
+    });
+    return;
+  }
+
+  // ── Member nickname protection ───────────────────────────────────────────
+  const state = store.threads[event.threadId];
+  if (!state?.protectNicknames) return;
+
+  const expected = state.nicknames[event.participantId];
+  if (!expected) return;
+  if (event.newNickname === expected) return;
+
+  log.info("GroupHandler: member nickname changed — restoring.", {
+    threadId:    event.threadId,
+    uid:         event.participantId,
+    unwanted:    event.newNickname || "(cleared)",
+    expected,
+    changedBy:   event.changedBy,
+  });
+
+  await new Promise<void>((resolve) => {
+    api.changeNickname(expected, event.threadId, event.participantId, (err) => {
+      if (err) {
+        log.warn("GroupHandler: member nickname restore failed.", {
+          threadId: event.threadId,
+          uid:      event.participantId,
+          error:    err.message,
+        });
+      } else {
+        log.info("GroupHandler: member nickname restored.", {
+          threadId: event.threadId,
+          uid:      event.participantId,
+          expected,
+        });
+      }
+      resolve();
+    });
+  });
 }

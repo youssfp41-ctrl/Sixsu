@@ -59,7 +59,9 @@ import {
   handleMessage,
 } from "./handlers/message.handler";
 import {
-  setGroupSender, setGroupBotUserId, handleMemberJoined, handleMemberLeft,
+  setGroupSender, setGroupBotUserId, setGroupApiGetter,
+  handleMemberJoined, handleMemberLeft,
+  handleNameChanged, handleNicknameChanged,
 } from "./handlers/group.handler";
 
 function buildBanMessage(entry: BanEntry): string {
@@ -105,10 +107,12 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
 
   log.info(`Account [${label}]: transport created.`, { botUserId, systemName });
 
-  // Primary account drives group join/leave handler singletons
+  // Primary account drives group join/leave/protection handler singletons
   if (isPrimary) {
     setGroupSender(sender);
     setGroupBotUserId(botUserId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    setGroupApiGetter(() => transport.getApi() as any);
   }
 
   const normalizer = new FacebookEventNormalizer();
@@ -135,8 +139,10 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
         },
         handleMessage,
         {
-          onMemberJoined: handleMemberJoined,
-          onMemberLeft:   handleMemberLeft,
+          onMemberJoined:    handleMemberJoined,
+          onMemberLeft:      handleMemberLeft,
+          onNameChanged:     handleNameChanged,
+          onNicknameChanged: handleNicknameChanged,
         },
       );
     }

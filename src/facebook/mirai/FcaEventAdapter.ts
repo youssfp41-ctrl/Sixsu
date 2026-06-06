@@ -4,26 +4,6 @@ import { LoggerManager } from "../../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("FcaEventAdapter");
 
-/**
- * FcaEventAdapter — converts raw FCA events into Sixsu's MessagingEntry format.
- *
- * Design decisions:
- *
- *  1. sender.id is mapped from FCA's threadID (not senderID).
- *     This ensures ctx.reply() sends to the correct conversation for both
- *     DMs (where threadID === senderID) and group chats (where they differ).
- *
- *  2. senderFbId carries the real Facebook user ID — needed for user tracking,
- *     ban enforcement, and admin permission checks in group chats.
- *
- *  3. recipient.id is always the bot's own Facebook user ID.
- *
- *  4. Only "message", "message_reply", and group action events are adapted.
- *     All other FCA event types (typ, read_receipt, presence, etc.) are
- *     silently dropped to avoid polluting the command pipeline.
- *
- *  5. The bot's own messages are dropped (self-listen disabled).
- */
 export class FcaEventAdapter {
   private readonly botUserId: string;
 
@@ -32,10 +12,6 @@ export class FcaEventAdapter {
     log.info("FcaEventAdapter: initialized.", { botUserId });
   }
 
-  /**
-   * Convert a raw FCA event into a MessagingEntry array.
-   * Returns [] if the event should be ignored.
-   */
   adapt(event: FcaEvent): MessagingEntry[] {
     log.info("FcaEventAdapter: adapt called.", { type: event.type });
     switch (event.type) {
@@ -54,16 +30,12 @@ export class FcaEventAdapter {
     }
   }
 
-  // ── Private ───────────────────────────────────────────────────────────────
-
   private adaptMessage(event: FcaMessageEvent): MessagingEntry[] {
-    // Drop messages sent by the bot itself
     if (event.senderID === this.botUserId) {
       log.debug("FcaEventAdapter: dropping own message.");
       return [];
     }
 
-    // Must have text or attachments to be actionable
     if (!event.body && !event.attachments?.length) {
       log.debug("FcaEventAdapter: dropping empty message.", { type: event.type });
       return [];
@@ -77,8 +49,6 @@ export class FcaEventAdapter {
       (a) => this.adaptAttachment(a),
     );
 
-    // sender.id = threadID  → correct reply routing for both DMs and groups.
-    // senderFbId = senderID → real user identity for tracking, bans, permissions.
     const entry: MessagingEntry = {
       sender:     { id: event.threadID },
       senderFbId: event.senderID,
@@ -114,40 +84,78 @@ export class FcaEventAdapter {
           .map((p) => ({ id: p.userFbId }));
         if (!added.length) return [];
 
-        const entry: MessagingEntry = {
-          sender:             { id: event.threadID },
-          recipient:          { id: this.botUserId },
-          timestamp:          ts,
-          thread_action:      "added_participants",
-          added_participants: added,
-        };
-
         log.info("FcaEventAdapter: member(s) joined.", {
           threadID: event.threadID,
           added:    added.map((p) => p.id),
         });
 
-        return [entry];
+        return [{
+          sender:             { id: event.threadID },
+          recipient:          { id: this.botUserId },
+          timestamp:          ts,
+          thread_action:      "added_participants",
+          added_participants: added,
+        }];
       }
 
       case "log:unsubscribe": {
         const leftId = event.logMessageData.leftParticipantFbId;
         if (!leftId) return [];
 
-        const entry: MessagingEntry = {
-          sender:               { id: event.threadID },
-          recipient:            { id: this.botUserId },
-          timestamp:            ts,
-          thread_action:        "removed_participants",
-          removed_participants: [{ id: leftId }],
-        };
-
         log.info("FcaEventAdapter: member left.", {
           threadID: event.threadID,
           leftId,
         });
 
-        return [entry];
+        return [{
+          sender:               { id: event.threadID },
+          recipient:            { id: this.botUserId },
+          timestamp:            ts,
+          thread_action:        "removed_participants",
+          removed_participants: [{ id: leftId }],
+        }];
+      }
+
+      case "log:thread-name": {
+        const newName = event.logMessageData?.name;
+        if (!newName) return [];
+
+        log.info("FcaEventAdapter: group name changed.", {
+          threadID: event.threadID,
+          newName,
+          changedBy: event.senderID,
+        });
+
+        return [{
+          sender:      { id: event.threadID },
+          senderFbId:  event.senderID,
+          recipient:   { id: this.botUserId },
+          timestamp:   ts,
+          thread_action: "name_changed",
+          name_change: { newName, changedBy: event.senderID },
+        }];
+      }
+
+      case "log:user-nickname": {
+        const participantId = event.logMessageData?.participant_id;
+        if (!participantId) return [];
+        const newNickname = event.logMessageData?.nickname ?? "";
+
+        log.info("FcaEventAdapter: nickname changed.", {
+          threadID:      event.threadID,
+          participantId,
+          newNickname:   newNickname || "(cleared)",
+          changedBy:     event.senderID,
+        });
+
+        return [{
+          sender:          { id: event.threadID },
+          senderFbId:      event.senderID,
+          recipient:       { id: this.botUserId },
+          timestamp:       ts,
+          thread_action:   "nickname_changed",
+          nickname_change: { participantId, newNickname, changedBy: event.senderID },
+        }];
       }
 
       default:

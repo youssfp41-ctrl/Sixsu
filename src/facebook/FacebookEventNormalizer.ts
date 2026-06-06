@@ -5,6 +5,8 @@ import {
   FBPostbackEvent,
   FBMemberJoinedEvent,
   FBMemberLeftEvent,
+  FBNameChangedEvent,
+  FBNicknameChangedEvent,
   FBUnknownEvent,
   FBAttachment,
 } from "./types/events";
@@ -31,9 +33,9 @@ export class FacebookEventNormalizer {
     if (entry.thread_action === "added_participants") {
       const event: FBMemberJoinedEvent = {
         ...base,
-        type:            "member_joined",
-        addedByUserId:   entry.sender.id,
-        members:         (entry.added_participants ?? []).map((p) => p.id),
+        type:          "member_joined",
+        addedByUserId: entry.sender.id,
+        members:       (entry.added_participants ?? []).map((p) => p.id),
       };
       return event;
     }
@@ -43,6 +45,29 @@ export class FacebookEventNormalizer {
         ...base,
         type:    "member_left",
         members: (entry.removed_participants ?? []).map((p) => p.id),
+      };
+      return event;
+    }
+
+    if (entry.thread_action === "name_changed" && entry.name_change) {
+      const event: FBNameChangedEvent = {
+        ...base,
+        type:      "name_changed",
+        threadId:  entry.sender.id,
+        newName:   entry.name_change.newName,
+        changedBy: entry.name_change.changedBy,
+      };
+      return event;
+    }
+
+    if (entry.thread_action === "nickname_changed" && entry.nickname_change) {
+      const event: FBNicknameChangedEvent = {
+        ...base,
+        type:          "nickname_changed",
+        threadId:      entry.sender.id,
+        participantId: entry.nickname_change.participantId,
+        newNickname:   entry.nickname_change.newNickname,
+        changedBy:     entry.nickname_change.changedBy,
       };
       return event;
     }
@@ -74,4 +99,3 @@ export class FacebookEventNormalizer {
     return entries.map((e) => this.normalize(e));
   }
 }
-

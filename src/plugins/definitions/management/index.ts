@@ -5,7 +5,11 @@ import { IPlugin, PluginManifest } from "../../types/IPlugin";
 import { IPluginContext }          from "../../types/IPluginContext";
 import { ICommand }                from "../../../commands/types/ICommand";
 import { Context }                 from "../../../context/Context";
-import { FcaEvent, FcaGroupEvent } from "../../../facebook/mirai/FcaTypes";
+import {
+  setProtectionStore,
+  ThreadState,
+  ProtectionStore,
+} from "../../../protection/ProtectionRegistry";
 
 // ─── Extended FCA types ──────────────────────────────────────────────────────
 
@@ -45,30 +49,16 @@ interface IFcaManagement {
 
 interface IMiraiService {
   getApi(): IFcaManagement | null;
-  addRawEventListener(fn: (event: FcaEvent) => void): void;
-  removeRawEventListener(fn: (event: FcaEvent) => void): void;
 }
 
 // ─── Persistent store ────────────────────────────────────────────────────────
 
-interface ThreadState {
-  protectName:      boolean;
-  lockedName:       string;
-  protectNicknames: boolean;
-  nicknames:        Record<string, string>;
-}
-
-interface StoreData {
-  threads:      Record<string, ThreadState>;
-  botNicknames: Record<string, string>;
-}
-
 const DATA_PATH = path.resolve("data/management-plugin.json");
 
-function loadStore(): StoreData {
+function loadStore(): ProtectionStore {
   try {
     if (fs.existsSync(DATA_PATH)) {
-      const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as StoreData;
+      const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as ProtectionStore;
       if (!raw.botNicknames) raw.botNicknames = {};
       return raw;
     }
@@ -76,13 +66,14 @@ function loadStore(): StoreData {
   return { threads: {}, botNicknames: {} };
 }
 
-function saveStore(data: StoreData): void {
+function saveStore(data: ProtectionStore): void {
   const dir = path.dirname(DATA_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
+  setProtectionStore(data);
 }
 
-function getThreadState(data: StoreData, threadID: string): ThreadState {
+function getThreadState(data: ProtectionStore, threadID: string): ThreadState {
   if (!data.threads[threadID]) {
     data.threads[threadID] = {
       protectName:      false,
@@ -219,7 +210,7 @@ async function handleGroupName(ctx: Context, pCtx: IPluginContext): Promise<void
   }
 }
 
-async function handleBotName(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
+async function handleBotName(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
   await ctx.typingOn();
 
   if (!ctx.hasRole("owner")) {
@@ -271,7 +262,7 @@ async function handleBotName(ctx: Context, pCtx: IPluginContext, store: StoreDat
   }
 }
 
-async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
+async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
   await ctx.typingOn();
 
   const api = getApi(pCtx);
@@ -286,7 +277,7 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Stor
     return;
   }
 
-  const botId = api.getCurrentUserID();
+  const botId   = api.getCurrentUserID();
   const botNick = store.botNicknames[ctx.thread.id] ?? null;
 
   const participants = info.participantIDs.filter((id) => id !== botId);
@@ -306,7 +297,6 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Stor
     await sleep(1_000);
   }
 
-  // Restore bot nickname after batch
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
@@ -323,7 +313,7 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Stor
   await ctx.reply(lines.join("\n"));
 }
 
-async function handleProtection(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
+async function handleProtection(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
   const target = ctx.getArg(0);
 
   if (target === "اسم") {
@@ -339,7 +329,7 @@ async function handleProtection(ctx: Context, pCtx: IPluginContext, store: Store
   }
 }
 
-async function handleProtectName(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
+async function handleProtectName(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
@@ -363,7 +353,7 @@ async function handleProtectName(ctx: Context, pCtx: IPluginContext, store: Stor
   }
 }
 
-async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
+async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
@@ -392,7 +382,7 @@ async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store:
   }
 }
 
-async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: StoreData): Promise<void> {
+async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
   await ctx.typingOn();
 
   const target = ctx.getArg(0);
@@ -444,100 +434,24 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: S
   await ctx.reply(lines.join("\n"));
 }
 
-// ─── Event-driven protection handler ─────────────────────────────────────────
-//
-// Listens to raw FCA events:
-//   • log:thread-name    → if name protection is on, revert the change
-//   • log:user-nickname  → if nickname/bot-nick protection is on, restore it
-//
-// This replaces the old 5-second polling approach — reactions happen instantly.
-
-function createProtectionHandler(pCtx: IPluginContext, store: StoreData) {
-  return function protectionHandler(event: FcaEvent): void {
-    if (event.type !== "event") return;
-
-    const ge = event as FcaGroupEvent;
-    const threadID = ge.threadID;
-    if (!threadID) return;
-
-    const api = pCtx.consumeService<IMiraiService>("mirai-transport")?.getApi?.() ?? null;
-    if (!api) return;
-
-    // ── Group name changed ─────────────────────────────────────────────────
-    if (ge.logMessageType === "log:thread-name") {
-      const state = store.threads[threadID];
-      if (!state?.protectName || !state.lockedName) return;
-
-      const newName = ge.logMessageData?.name ?? "";
-      if (newName === state.lockedName) return;
-
-      pCtx.logger.warn("Name protection triggered (event) — reverting.", {
-        threadID, found: newName, locked: state.lockedName,
-      });
-
-      fcaSetTitle(api, state.lockedName, threadID).catch((err: unknown) => {
-        pCtx.logger.debug("Name protection revert failed.", { threadID, error: String(err) });
-      });
-      return;
-    }
-
-    // ── Nickname changed ───────────────────────────────────────────────────
-    if (ge.logMessageType === "log:user-nickname") {
-      const participantId = ge.logMessageData?.participant_id;
-      const newNick       = ge.logMessageData?.nickname ?? "";
-      if (!participantId) return;
-
-      const botId = api.getCurrentUserID();
-
-      // Bot nickname protection
-      if (participantId === botId) {
-        const protectedNick = store.botNicknames[threadID];
-        if (protectedNick && newNick !== protectedNick) {
-          pCtx.logger.warn("Bot nickname protection triggered (event) — restoring.", {
-            threadID, found: newNick || "(empty)", expected: protectedNick,
-          });
-          fcaChangeNickname(api, protectedNick, threadID, botId).catch((err: unknown) => {
-            pCtx.logger.debug("Bot nickname restore failed.", { error: String(err) });
-          });
-        }
-        return;
-      }
-
-      // Member nickname protection
-      const state = store.threads[threadID];
-      if (!state?.protectNicknames) return;
-
-      const expected = state.nicknames[participantId];
-      if (!expected || newNick === expected) return;
-
-      pCtx.logger.info("Nickname protection triggered (event) — restoring.", {
-        threadID, uid: participantId, expected, found: newNick || "(empty)",
-      });
-      fcaChangeNickname(api, expected, threadID, participantId).catch((err: unknown) => {
-        pCtx.logger.debug("Nickname restore failed.", { error: String(err) });
-      });
-    }
-  };
-}
-
 // ─── Plugin class ─────────────────────────────────────────────────────────────
 
 class ManagementPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "management",
-    version:     "3.0.0",
-    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية فورية مدمجة في الأحداث.",
+    version:     "4.0.0",
+    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية مدمجة في pipeline الأحداث.",
     author:      "Sixseven-6677",
   };
 
   private ctx!:  IPluginContext;
-  private store: StoreData = { threads: {}, botNicknames: {} };
-  private protectionHandler: ((event: FcaEvent) => void) | null = null;
+  private store: ProtectionStore = { threads: {}, botNicknames: {} };
 
   async onLoad(ctx: IPluginContext): Promise<void> {
     this.ctx   = ctx;
-    this.store  = loadStore();
-    ctx.logger.info("ManagementPlugin loaded.", {
+    this.store = loadStore();
+    setProtectionStore(this.store);
+    ctx.logger.info("ManagementPlugin loaded — ProtectionRegistry initialised.", {
       savedThreads:  Object.keys(this.store.threads).length,
       protectedBots: Object.keys(this.store.botNicknames).length,
     });
@@ -618,36 +532,13 @@ class ManagementPlugin implements IPlugin {
       pCtx.logger.info(`Command "${cmd.name}" registered (aliases: ${cmd.aliases?.join(", ")}).`);
     }
 
-    // ── Event-driven protection (primary + secondary transports) ───────────
-    const mirai    = pCtx.consumeService<IMiraiService>("mirai-transport");
-    const mirai2   = pCtx.consumeService<IMiraiService>("mirai-transport-secondary");
-    const hasAny   = mirai?.addRawEventListener || mirai2?.addRawEventListener;
-
-    if (hasAny) {
-      this.protectionHandler = createProtectionHandler(pCtx, store);
-      if (mirai?.addRawEventListener)  mirai.addRawEventListener(this.protectionHandler);
-      if (mirai2?.addRawEventListener) mirai2.addRawEventListener(this.protectionHandler);
-      pCtx.logger.info(
-        "ManagementPlugin enabled — event-driven protection active on " +
-        [mirai ? "primary" : null, mirai2 ? "secondary" : null].filter(Boolean).join(" + ") +
-        " (log:thread-name + log:user-nickname)."
-      );
-    } else {
-      pCtx.logger.warn(
-        "ManagementPlugin: no mirai-transport available. Protection events disabled."
-      );
-    }
+    pCtx.logger.info(
+      "ManagementPlugin enabled — protection handled via FCA event pipeline " +
+      "(log:thread-name + log:user-nickname → GroupHandler)."
+    );
   }
 
   async onDisable(): Promise<void> {
-    if (this.protectionHandler) {
-      const mirai  = this.ctx.consumeService<IMiraiService>("mirai-transport");
-      const mirai2 = this.ctx.consumeService<IMiraiService>("mirai-transport-secondary");
-      mirai?.removeRawEventListener?.(this.protectionHandler);
-      mirai2?.removeRawEventListener?.(this.protectionHandler);
-      this.protectionHandler = null;
-      this.ctx.logger.info("ManagementPlugin: protection handler unregistered from all transports.");
-    }
     saveStore(this.store);
     this.ctx.logger.info("ManagementPlugin disabled — store saved.");
   }

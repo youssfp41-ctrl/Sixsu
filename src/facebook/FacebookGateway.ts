@@ -5,18 +5,27 @@ import { FacebookEventNormalizer } from "./FacebookEventNormalizer";
 import { ISender }                 from "./types/ISender";
 import { ContextBuilder }          from "../context/ContextBuilder";
 import { Context }                 from "../context/Context";
-import { FBMemberJoinedEvent, FBMemberLeftEvent } from "./types/events";
+import {
+  FBMemberJoinedEvent,
+  FBMemberLeftEvent,
+  FBNameChangedEvent,
+  FBNicknameChangedEvent,
+} from "./types/events";
 import { LoggerManager }           from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("FacebookGateway");
 
-export type MessageHandler      = (ctx: Context) => Promise<void>;
-export type MemberJoinedHandler = (event: FBMemberJoinedEvent) => Promise<void>;
-export type MemberLeftHandler   = (event: FBMemberLeftEvent)   => Promise<void>;
+export type MessageHandler         = (ctx: Context) => Promise<void>;
+export type MemberJoinedHandler    = (event: FBMemberJoinedEvent)   => Promise<void>;
+export type MemberLeftHandler      = (event: FBMemberLeftEvent)     => Promise<void>;
+export type NameChangedHandler     = (event: FBNameChangedEvent)    => Promise<void>;
+export type NicknameChangedHandler = (event: FBNicknameChangedEvent) => Promise<void>;
 
 export interface GroupHandlers {
-  onMemberJoined?: MemberJoinedHandler;
-  onMemberLeft?:   MemberLeftHandler;
+  onMemberJoined?:    MemberJoinedHandler;
+  onMemberLeft?:      MemberLeftHandler;
+  onNameChanged?:     NameChangedHandler;
+  onNicknameChanged?: NicknameChangedHandler;
 }
 
 export class FacebookGateway {
@@ -66,7 +75,6 @@ export class FacebookGateway {
 
     for (const entry of body.entry) {
       for (const messagingEntry of entry.messaging) {
-        // ── [1] Normalize raw webhook payload ──────────────────────────────
         const event = this.normalizer.normalize(messagingEntry);
 
         if (event.type === "unknown") {
@@ -74,8 +82,6 @@ export class FacebookGateway {
           continue;
         }
 
-        // ── [2] Log every event entering the pipeline ───────────────────────
-        // [DEBUG-3] Event received — starting pipeline
         log.info("Gateway: event received — starting pipeline.", {
           type:      event.type,
           senderId:  event.senderId,
@@ -93,10 +99,13 @@ export class FacebookGateway {
                 ? { addedByUserId: event.addedByUserId, members: event.members }
                 : event.type === "member_left"
                   ? { members: event.members }
-                  : {}),
+                  : event.type === "name_changed"
+                    ? { threadId: event.threadId, newName: event.newName }
+                    : event.type === "nickname_changed"
+                      ? { threadId: event.threadId, participantId: event.participantId }
+                      : {}),
         });
 
-        // ── [3a] Group member events ─────────────────────────────────────────
         if (event.type === "member_joined" && groupHandlers.onMemberJoined) {
           groupHandlers.onMemberJoined(event).catch((err: unknown) => {
             log.error("Unhandled error in member_joined handler.", {
@@ -117,14 +126,32 @@ export class FacebookGateway {
           continue;
         }
 
-        // ── [3b] Message / postback — build context then dispatch ──────────
+        if (event.type === "name_changed" && groupHandlers.onNameChanged) {
+          groupHandlers.onNameChanged(event).catch((err: unknown) => {
+            log.error("Unhandled error in name_changed handler.", {
+              senderId: event.senderId,
+              error:    err instanceof Error ? err.message : String(err),
+            });
+          });
+          continue;
+        }
+
+        if (event.type === "nickname_changed" && groupHandlers.onNicknameChanged) {
+          groupHandlers.onNicknameChanged(event).catch((err: unknown) => {
+            log.error("Unhandled error in nickname_changed handler.", {
+              senderId: event.senderId,
+              error:    err instanceof Error ? err.message : String(err),
+            });
+          });
+          continue;
+        }
+
         if (event.type !== "message" && event.type !== "postback") continue;
 
         const start = Date.now();
         this.contextBuilder
           .build(event)
           .then((ctx) => {
-            // ── [DEBUG-4] Context created — middleware chain starting ──────
             log.info("Gateway: context created — dispatching to handler.", {
               senderId:  event.senderId,
               buildMs:   Date.now() - start,
