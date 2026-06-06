@@ -62,8 +62,6 @@ import {
   setGroupSender, setGroupBotUserId, handleMemberJoined, handleMemberLeft,
 } from "./handlers/group.handler";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function buildBanMessage(entry: BanEntry): string {
   const expiry = entry.expiresAt
     ? ` ينتهي: ${entry.expiresAt.toLocaleString("ar-SA")}.`
@@ -80,32 +78,35 @@ function isValidMongoUri(uri: string): boolean {
          (uri.startsWith("mongodb+srv://") && uri.length > 14);
 }
 
-// ─── Per-account FCA bootstrap ────────────────────────────────────────────────
+// ─── Per-account setup ────────────────────────────────────────────────────────
 //
-// Each Facebook account gets its own MiraiTransport (MQTT connection),
-// MiraiSender, FcaEventAdapter, and FacebookGateway so that replies always
-// come from the correct account.  All accounts share the same command pipeline,
-// plugin system, and service infrastructure.
+// Each Facebook account gets its own MiraiTransport (unique system name),
+// MiraiSender, FcaEventAdapter, and FacebookGateway so replies always use
+// the correct account.  All accounts share the same command pipeline.
 
 interface AccountSetupOptions {
-  label:       string;          // "primary" | "secondary"
+  label:       string;
   credentials: AuthCredentials;
   userSvc:     UserService;
   bot:         Bot;
+  isPrimary:   boolean;
 }
 
 function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
-  const { label, credentials, userSvc, bot } = opts;
+  const { label, credentials, userSvc, bot, isPrimary } = opts;
 
-  const cookieClient   = new CookieHttpClient(credentials.appState);
-  const botUserId      = cookieClient.getUserId();
-  const miraiTransport = new MiraiTransport(credentials.appState);
-  const sender: ISender = new MiraiSender(miraiTransport);
+  const cookieClient = new CookieHttpClient(credentials.appState);
+  const botUserId    = cookieClient.getUserId();
 
-  log.info(`Account [${label}]: FCA transport created.`, { botUserId });
+  // Each transport gets a unique system name so Bot.register() doesn't conflict
+  const systemName   = isPrimary ? "mirai-transport" : `mirai-transport-${label}`;
+  const transport    = new MiraiTransport(credentials.appState, systemName);
+  const sender: ISender = new MiraiSender(transport);
 
-  // Primary account drives group.handler singletons (join/leave events)
-  if (label === "primary") {
+  log.info(`Account [${label}]: transport created.`, { botUserId, systemName });
+
+  // Primary account drives group join/leave handler singletons
+  if (isPrimary) {
     setGroupSender(sender);
     setGroupBotUserId(botUserId);
   }
@@ -120,7 +121,7 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
 
   const adapter = new FcaEventAdapter(botUserId);
 
-  miraiTransport.setEventHandler((fcaEvent) => {
+  transport.setEventHandler((fcaEvent) => {
     const entries = adapter.adapt(fcaEvent);
     for (const entry of entries) {
       gateway.processWebhookBody(
@@ -141,26 +142,25 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
     }
   });
 
-  bot.register(miraiTransport);
-
-  log.info(`Account [${label}]: registered and ready.`, { botUserId });
-  return miraiTransport;
+  bot.register(transport);
+  log.info(`Account [${label}]: registered (${systemName}).`, { botUserId });
+  return transport;
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function bootstrap(): Promise<void> {
 
-  // ── 1. Start HTTP server immediately — Railway healthcheck passes right away
+  // 1. HTTP server starts first — Railway healthcheck passes immediately
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
-  const transports: MiraiTransport[] = [];
+  const transports: Array<{ label: string; transport: MiraiTransport }> = [];
 
   app.get(["/health", "/api/health", "/api/healthz"], (_req, res) => {
-    const accounts = transports.map((t, i) => ({
-      account:   i === 0 ? "primary" : "secondary",
+    const accounts = transports.map(({ label, transport: t }) => ({
+      account:   label,
       connected: t.getApi() !== null,
       userId:    t.getCurrentUserId() || null,
     }));
@@ -175,7 +175,7 @@ async function bootstrap(): Promise<void> {
     srv.on("error", (err: Error) => { log.error("HTTP server failed.", err); reject(err); });
   });
 
-  // ── 2. Core services ──────────────────────────────────────────────────────
+  // 2. Core services
   const bot = new Bot();
 
   const errorHandler = new ProcessErrorHandler();
@@ -201,32 +201,26 @@ async function bootstrap(): Promise<void> {
   const scheduler = new TaskScheduler();
   bot.register(scheduler);
 
-  // ── 3. Auth ───────────────────────────────────────────────────────────────
+  // 3. Auth — register primary and optional secondary account
   const auth = new AuthManager();
 
-  // Primary account
   const appStateVal  = process.env[config.auth.appStateEnvKey] ?? process.env["FB_APPSTATE"];
   const appStateFile = config.auth.appStateFile;
   if (appStateFile) {
-    const { provider } = AuthManager.fromFile("primary", appStateFile);
-    auth.registerAccount("primary", provider);
+    auth.registerAccount("primary", AuthManager.fromFile("primary", appStateFile).provider);
   } else if (appStateVal) {
-    const { provider } = AuthManager.fromEnv("primary", config.auth.appStateEnvKey);
-    auth.registerAccount("primary", provider);
+    auth.registerAccount("primary", AuthManager.fromEnv("primary", config.auth.appStateEnvKey).provider);
   } else {
-    log.warn("FB_APPSTATE not set — bot will run in health-only mode.");
+    log.warn("FB_APPSTATE not set — health-only mode.");
   }
 
-  // Secondary account (optional)
   const appStateVal2  = process.env[config.auth.appStateEnvKey2] ?? process.env["FB_APPSTATE_2"];
   const appStateFile2 = config.auth.appStateFile2;
   if (appStateFile2) {
-    const { provider } = AuthManager.fromFile("secondary", appStateFile2);
-    auth.registerAccount("secondary", provider);
+    auth.registerAccount("secondary", AuthManager.fromFile("secondary", appStateFile2).provider);
     log.info("Secondary account registered from file.");
   } else if (appStateVal2) {
-    const { provider } = AuthManager.fromEnv("secondary", config.auth.appStateEnvKey2);
-    auth.registerAccount("secondary", provider);
+    auth.registerAccount("secondary", AuthManager.fromEnv("secondary", config.auth.appStateEnvKey2).provider);
     log.info("Secondary account registered from env (FB_APPSTATE_2).");
   }
 
@@ -249,21 +243,21 @@ async function bootstrap(): Promise<void> {
   });
   bot.register(reconnect);
 
-  // ── 4. User system ────────────────────────────────────────────────────────
+  // 4. User system
   const userRepo = new UserRepository();
   const userSvc  = new UserService(userRepo, cache.store("users"));
   setUserService(userSvc);
 
-  // ── 5. Commands ───────────────────────────────────────────────────────────
+  // 5. Commands & middleware
   const registry    = new CommandRegistry();
   const loader      = new CommandLoader(registry);
-  const commandsDir = path.resolve(config.bot.commandsDir);
-  await loader.load(commandsDir);
-  loader.watch(commandsDir);
+  await loader.load(path.resolve(config.bot.commandsDir));
+  loader.watch(path.resolve(config.bot.commandsDir));
 
   const banStore      = new BanStore();
   const lockdownStore = new LockdownStore();
   const adminStore    = new AdminStore(config.bot.adminIds);
+  log.info("AdminStore ready.", { adminCount: adminStore.size() });
 
   const mwManager = new MiddlewareManager()
     .register(createBannedMiddleware({ store: banStore, message: buildBanMessage }))
@@ -291,39 +285,33 @@ async function bootstrap(): Promise<void> {
   setReconnectManager(reconnect);
   setBanStore(banStore);
 
-  // ── 6. FCA Accounts ───────────────────────────────────────────────────────
-  //
-  // Each account (primary / secondary) gets its own MQTT transport, sender,
-  // adapter, and gateway.  All share the same command pipeline.
-  // Fallback: if no FCA accounts, use Graph API sender or NoOp.
-
+  // 6. FCA accounts — each gets its own transport + sender + gateway
   const primaryCreds   = auth.getCredentials("primary");
   const secondaryCreds = auth.getCredentials("secondary");
 
   if (primaryCreds) {
-    const t = bootFcaAccount({ label: "primary", credentials: primaryCreds, userSvc, bot });
-    transports.push(t);
+    const t = bootFcaAccount({ label: "primary", credentials: primaryCreds, userSvc, bot, isPrimary: true });
+    transports.push({ label: "primary", transport: t });
   }
 
   if (secondaryCreds) {
-    const t = bootFcaAccount({ label: "secondary", credentials: secondaryCreds, userSvc, bot });
-    transports.push(t);
-    log.info("Secondary account is ACTIVE — bot is running on two Facebook accounts.");
+    const t = bootFcaAccount({ label: "secondary", credentials: secondaryCreds, userSvc, bot, isPrimary: false });
+    transports.push({ label: "secondary", transport: t });
+    log.info("✅ Two accounts active — bot running on primary + secondary Facebook accounts.");
   }
 
   if (!primaryCreds && !secondaryCreds) {
-    // Graph API fallback
     if (config.facebook.pageAccessToken) {
       const connection = new FacebookConnection();
       const client     = new FacebookClient(connection);
       const sender: ISender = new FacebookSender(client);
       setGroupSender(sender);
       connection.connect();
-      log.info("Sender: FacebookSender active (Graph API).");
+      log.info("Sender: FacebookSender (Graph API).");
     } else {
-      log.warn("No sender available — health-only mode. Set FB_APPSTATE to enable messaging.");
+      log.warn("No sender — health-only mode. Set FB_APPSTATE.");
       const noOp: ISender = {
-        sendText:     async () => { log.warn("NoOpSender: no FB_APPSTATE configured."); },
+        sendText:     async () => { log.warn("NoOpSender: no FB_APPSTATE."); },
         sendTyping:   async () => {},
         sendReaction: async () => {},
       };
@@ -331,7 +319,7 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  // ── 7. Plugin system ──────────────────────────────────────────────────────
+  // 7. Plugin system
   const pluginManager = new PluginManager({
     commandRegistry: registry,
     scheduler,
@@ -346,20 +334,13 @@ async function bootstrap(): Promise<void> {
   svcReg.provide("admin-store",      adminStore,      "core");
   svcReg.provide("user-service",     userSvc,         "core");
 
-  // Expose primary transport to plugins
   if (transports[0]) {
-    svcReg.provide("mirai-transport", transports[0], "core");
-    log.info("Core service registered: mirai-transport (primary).");
+    svcReg.provide("mirai-transport",   transports[0].transport, "core");
+    const primarySender = new MiraiSender(transports[0].transport);
+    svcReg.provide("facebook-sender",  primarySender,           "core");
   }
   if (transports[1]) {
-    svcReg.provide("mirai-transport-2", transports[1], "core");
-    log.info("Core service registered: mirai-transport-2 (secondary).");
-  }
-
-  // Expose primary sender for plugins that need to send messages
-  if (primaryCreds && transports[0]) {
-    const primarySender = new MiraiSender(transports[0]);
-    svcReg.provide("facebook-sender", primarySender, "core");
+    svcReg.provide("mirai-transport-secondary", transports[1].transport, "core");
   }
 
   if (config.facebook.pageAccessToken) {
@@ -368,43 +349,33 @@ async function bootstrap(): Promise<void> {
 
   bot.register(pluginManager);
 
-  // ── 8. Add webhook routes to running server ───────────────────────────────
+  // 8. Webhook routes (primary account handles webhook verification)
   if (transports[0]) {
-    const primaryNormalizer = new FacebookEventNormalizer();
-    const primaryConnection = new FacebookConnection();
-    const primaryGateway    = new FacebookGateway(
-      primaryConnection,
-      new MiraiSender(transports[0]),
-      primaryNormalizer,
-    );
-    primaryGateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
-    primaryGateway.getContextBuilder().setUserService(userSvc);
-    primaryConnection.connect();
+    const conn    = new FacebookConnection();
+    const gateway = new FacebookGateway(conn, new MiraiSender(transports[0].transport), new FacebookEventNormalizer());
+    gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
+    gateway.getContextBuilder().setUserService(userSvc);
+    conn.connect();
 
-    const webhookRouter = createWebhookRouter(primaryGateway, {
+    app.use("/webhook", createWebhookRouter(gateway, {
       onMemberJoined: handleMemberJoined,
       onMemberLeft:   handleMemberLeft,
-    });
-    app.use("/webhook", webhookRouter);
+    }));
   }
 
   app.use(notFoundHandler);
   app.use(httpErrorHandler);
 
-  // ── 9. Start bot ──────────────────────────────────────────────────────────
+  // 9. Start bot
   await bot.start();
 
-  const accountCount = transports.length;
-  log.info("── BOT READY ──────────────────────────────────────────────────", {
-    accounts:  accountCount,
-    userIds:   transports.map(t => t.getCurrentUserId()).filter(Boolean),
-    prefix:    config.bot.prefix,
-    nodeEnv:   config.nodeEnv,
+  log.info("── BOT READY ────────────────────────────────────────────────", {
+    accounts: transports.map(({ label, transport: t }) => ({ label, userId: t.getCurrentUserId() })),
+    prefix:   config.bot.prefix,
+    nodeEnv:  config.nodeEnv,
   });
 
-  if (process.send) {
-    process.send("ready");
-  }
+  if (process.send) process.send("ready");
 }
 
 bootstrap().catch((err: unknown) => {
