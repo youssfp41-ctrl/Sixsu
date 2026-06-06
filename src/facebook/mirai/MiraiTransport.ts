@@ -12,20 +12,18 @@ const fcaLogin = require("@dongdev/fca-unofficial") as (
 
 export type FcaEventHandler = (event: FcaEvent) => void;
 
-/** Facebook error codes that indicate an unrecoverable session problem. */
 const FATAL_FB_ERRORS = new Set([
-  1357004, // "Not logged in" — AppState expired or MQTT seq-id missing
-  1357031, // Checkpoint / suspicious login
-  1357045, // Account locked
+  1357004,
+  1357031,
+  1357045,
 ]);
 
-/** Error message fragments that indicate the AppState is permanently expired. */
 const SESSION_EXPIRED_HINTS = [
   "fb_appstate expired",
   "appstate expired",
   "appstate die",
   "c_user/i_user cookie not found",
-  "không tìm thấy cookie",   // fca-unofficial Vietnamese: "cookie not found"
+  "không tìm thấy cookie",
 ] as const;
 
 function isSessionExpiredError(msg: string): boolean {
@@ -33,24 +31,14 @@ function isSessionExpiredError(msg: string): boolean {
   return SESSION_EXPIRED_HINTS.some(hint => lower.includes(hint.toLowerCase()));
 }
 
-/**
- * MiraiTransport — Facebook transport layer for Sixsu.
- *
- * Uses fca-unofficial (proven in Fang / isoy-fca 1.3.10) as a Facebook
- * MQTT transport.
- *
- * Supports multiple raw event listeners via addRawEventListener —
- * plugins can subscribe to FCA events (e.g. log:thread-name, log:user-nickname)
- * without replacing the main event handler.
- */
 export class MiraiTransport implements ISystem {
-  readonly name = "mirai-transport";
+  /** Unique system name — configurable so multiple instances can coexist in Bot. */
+  readonly name: string;
 
   private readonly appState: FcaCookie[];
   private api:              FcaApi | null       = null;
   private stopListenFn:     (() => void) | null  = null;
   private eventHandler:     FcaEventHandler | null = null;
-  /** Additional raw event listeners (e.g. from plugins). Called after the main handler. */
   private rawListeners:     FcaEventHandler[]    = [];
   private running           = false;
   private reconnectTimer:   ReturnType<typeof setTimeout> | null = null;
@@ -73,27 +61,27 @@ export class MiraiTransport implements ISystem {
     autoReconnect:     true,
   };
 
-  constructor(appState: FcaCookie[]) {
+  /**
+   * @param appState  Facebook session cookies
+   * @param systemName  Unique name for ISystem registry — defaults to "mirai-transport".
+   *                    Pass a different name (e.g. "mirai-transport-secondary") when
+   *                    registering a second account so Bot.register() doesn't conflict.
+   */
+  constructor(appState: FcaCookie[], systemName = "mirai-transport") {
     this.appState = appState;
+    this.name     = systemName;
   }
 
   setEventHandler(handler: FcaEventHandler): void {
     this.eventHandler = handler;
   }
 
-  /**
-   * Register an additional raw FCA event listener.
-   * Useful for plugins that need to react to events like log:thread-name or
-   * log:user-nickname without replacing the main pipeline handler.
-   * Listeners are called after the main eventHandler, each in its own try/catch.
-   */
   addRawEventListener(fn: FcaEventHandler): void {
     if (!this.rawListeners.includes(fn)) {
       this.rawListeners.push(fn);
     }
   }
 
-  /** Remove a previously registered raw listener. */
   removeRawEventListener(fn: FcaEventHandler): void {
     this.rawListeners = this.rawListeners.filter(l => l !== fn);
   }
@@ -102,11 +90,9 @@ export class MiraiTransport implements ISystem {
   getCurrentUserId(): string      { return this.api?.getCurrentUserID() ?? ""; }
   getAppState(): FcaCookie[]      { return this.api?.getAppState() ?? this.appState; }
 
-  // ── ISystem ──────────────────────────────────────────────────────────────
-
   async initialize(): Promise<void> {
     this.running = true;
-    log.info("MiraiTransport: initializing…", { cookieCount: this.appState.length });
+    log.info(`MiraiTransport [${this.name}]: initializing…`, { cookieCount: this.appState.length });
     await this.doLogin();
   }
 
@@ -116,10 +102,8 @@ export class MiraiTransport implements ISystem {
     this.stopListening();
     if (this.api) { try { this.api.logout(); } catch { /**/ } this.api = null; }
     this.rawListeners = [];
-    log.info("MiraiTransport: destroyed.");
+    log.info(`MiraiTransport [${this.name}]: destroyed.`);
   }
-
-  // ── Private ───────────────────────────────────────────────────────────────
 
   private getUserIdFromAppState(): string {
     const cookie = this.appState.find(c => c.key === "c_user");
@@ -130,9 +114,9 @@ export class MiraiTransport implements ISystem {
     return new Promise<void>((resolve) => {
       const earlyPageId = this.getUserIdFromAppState();
 
-      log.info("MiraiTransport: logging in via fca-unofficial…", {
+      log.info(`MiraiTransport [${this.name}]: logging in…`, {
         attempt:     this.loginAttempts + 1,
-        earlyPageId: earlyPageId || "(not found in AppState)",
+        earlyPageId: earlyPageId || "(not found)",
       });
 
       let resolved = false;
@@ -152,8 +136,7 @@ export class MiraiTransport implements ISystem {
 
           if (isSessionExpiredError(errMsg)) {
             log.error(
-              "MiraiTransport: FB_APPSTATE is expired or invalid — stopping all retries." +
-              " Please generate a new appState from Facebook and update FB_APPSTATE in Railway.",
+              `MiraiTransport [${this.name}]: AppState expired — stopping retries.`,
               { error: errMsg },
             );
             this.running = false;
@@ -162,7 +145,7 @@ export class MiraiTransport implements ISystem {
             return;
           }
 
-          log.warn("MiraiTransport: login failed.", { error: errMsg });
+          log.warn(`MiraiTransport [${this.name}]: login failed.`, { error: errMsg });
           resolved = true;
           resolve();
           this.scheduleReLogin("login-error");
@@ -172,9 +155,7 @@ export class MiraiTransport implements ISystem {
         this.api = api;
         api.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
-        log.info("MiraiTransport: logged in successfully.", {
-          userId: api.getCurrentUserID(),
-        });
+        log.info(`MiraiTransport [${this.name}]: logged in.`, { userId: api.getCurrentUserID() });
 
         resolved = true;
         this.startListening();
@@ -186,13 +167,12 @@ export class MiraiTransport implements ISystem {
   private startListening(): void {
     if (!this.api) return;
 
-    log.info("MiraiTransport: starting MQTT event listener…");
+    log.info(`MiraiTransport [${this.name}]: starting MQTT listener…`);
     this.listenerStartMs = Date.now();
 
     this.stopListenFn = this.api.listen((err, event) => {
       if (err) {
         const stableMs = Date.now() - this.listenerStartMs;
-
         let errCode: number | undefined;
         let errMsg: string;
 
@@ -207,57 +187,45 @@ export class MiraiTransport implements ISystem {
         }
 
         if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
-          log.warn(
-            "MiraiTransport: FATAL session error — AppState is expired or invalid." +
-            " Please refresh FB_APPSTATE and restart the bot.",
-            { fbErrorCode: errCode, error: errMsg },
-          );
+          log.warn(`MiraiTransport [${this.name}]: FATAL error — AppState expired.`, { fbErrorCode: errCode });
           this.running = false;
           this.stopListening();
           this.api = null;
           return;
         }
 
-        log.warn("MiraiTransport: listener error — scheduling re-login.", {
-          error: errMsg, stableMs,
-        });
+        log.warn(`MiraiTransport [${this.name}]: listener error — re-login.`, { error: errMsg, stableMs });
 
         if (stableMs >= MiraiTransport.STABLE_LISTEN_MS) {
           this.loginAttempts = 0;
-          log.info("MiraiTransport: listener was stable — resetting login counter.");
         }
-
         this.scheduleReLogin("listen-error");
         return;
       }
 
       if (!this.running || !event) return;
 
-      log.info("MiraiTransport: raw event received.", { type: event.type });
+      log.info(`MiraiTransport [${this.name}]: raw event received.`, { type: event.type });
 
-      // ── Main pipeline handler ────────────────────────────────────────────
       try {
         this.eventHandler?.(event);
       } catch (handlerErr: unknown) {
-        log.error("MiraiTransport: event handler threw — event dropped.", {
+        log.error(`MiraiTransport [${this.name}]: event handler threw.`, {
           eventType: (event as Record<string, unknown>).type,
           error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
         });
       }
 
-      // ── Additional raw listeners (e.g. management plugin protection) ─────
       for (const listener of this.rawListeners) {
-        try {
-          listener(event);
-        } catch (listenerErr: unknown) {
-          log.warn("MiraiTransport: raw listener threw.", {
+        try { listener(event); } catch (listenerErr: unknown) {
+          log.warn(`MiraiTransport [${this.name}]: raw listener threw.`, {
             error: listenerErr instanceof Error ? listenerErr.message : String(listenerErr),
           });
         }
       }
     });
 
-    log.info("MiraiTransport: listener active — waiting for messages.");
+    log.info(`MiraiTransport [${this.name}]: listener active.`);
   }
 
   private stopListening(): void {
@@ -273,9 +241,7 @@ export class MiraiTransport implements ISystem {
     this.loginAttempts++;
 
     if (this.loginAttempts > MiraiTransport.MAX_LOGIN_ATTEMPTS) {
-      log.warn("MiraiTransport: max login attempts reached — giving up.", {
-        loginAttempts: this.loginAttempts,
-      });
+      log.warn(`MiraiTransport [${this.name}]: max login attempts reached.`);
       return;
     }
 
@@ -284,9 +250,7 @@ export class MiraiTransport implements ISystem {
       MiraiTransport.MAX_LOGIN_DELAY_MS,
     );
 
-    log.info("MiraiTransport: scheduling re-login.", {
-      reason, attempt: this.loginAttempts, maxAttempts: MiraiTransport.MAX_LOGIN_ATTEMPTS, delayMs: delay,
-    });
+    log.info(`MiraiTransport [${this.name}]: re-login in ${delay}ms.`, { reason, attempt: this.loginAttempts });
 
     this.stopListening();
     this.api = null;
@@ -295,7 +259,7 @@ export class MiraiTransport implements ISystem {
       this.reconnectTimer = null;
       if (!this.running) return;
       this.doLogin().catch((e: unknown) => {
-        log.error("MiraiTransport: re-login threw.", {
+        log.error(`MiraiTransport [${this.name}]: re-login threw.`, {
           error: e instanceof Error ? e.message : String(e),
         });
       });
