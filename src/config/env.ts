@@ -7,7 +7,7 @@ function optionalEnv(key: string, fallback = ""): string {
   return process.env[key] ?? fallback;
 }
 
-const isProd              = (process.env["NODE_ENV"] ?? "") === "production";
+const isProd               = (process.env["NODE_ENV"] ?? "") === "production";
 const DEFAULT_COMMANDS_DIR = isProd ? "dist/commands/definitions" : "src/commands/definitions";
 const DEFAULT_PLUGINS_DIR  = isProd ? "dist/plugins/definitions"  : "src/plugins/definitions";
 
@@ -52,11 +52,16 @@ export const config = {
   },
 
   auth: {
-    appStateEnvKey:  optionalEnv("FB_APPSTATE_ENV_KEY", "FB_APPSTATE"),
+    // ── Primary account ───────────────────────────────────────────────────
+    appStateEnvKey:  optionalEnv("FB_APPSTATE_ENV_KEY",  "FB_APPSTATE"),
     appStateFile:    optionalEnv("FB_APPSTATE_FILE"),
-    sessionFile:     optionalEnv("FB_SESSION_FILE", path.resolve("data/sessions.json")),
-    sessionSecret:   resolveSessionSecret(),
-    sessionTtlDays:  parseInt(optionalEnv("FB_SESSION_TTL_DAYS", "30"), 10),
+    // ── Secondary account (optional — set FB_APPSTATE_2 in env to activate)
+    appStateEnvKey2: optionalEnv("FB_APPSTATE_ENV_KEY_2", "FB_APPSTATE_2"),
+    appStateFile2:   optionalEnv("FB_APPSTATE_FILE_2"),
+
+    sessionFile:    optionalEnv("FB_SESSION_FILE", path.resolve("data/sessions.json")),
+    sessionSecret:  resolveSessionSecret(),
+    sessionTtlDays: parseInt(optionalEnv("FB_SESSION_TTL_DAYS", "30"), 10),
   },
 
   logger: {
