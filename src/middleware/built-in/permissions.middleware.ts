@@ -11,26 +11,19 @@ export type PermissionCheck = (
 ) => boolean | Promise<boolean>;
 
 export interface PermissionsOptions {
-  /** IDs of users who are admins — can run adminOnly commands. */
-  adminIds?: string[];
-  /** Dynamic admin store — checked in addition to static adminIds. */
-  adminStore?: { has(id: string): boolean };
-  /** Only these users can use the bot. If empty/undefined, all users allowed. */
-  allowlist?: string[];
-  /** These users can NEVER use the bot. Checked before allowlist. */
-  blocklist?: string[];
-  /** Custom async permission check. Runs after built-in checks. */
-  check?: PermissionCheck;
-  /** Reply sent when access is denied. */
+  adminIds?:    string[];
+  adminStore?:  { has(id: string): boolean };
+  allowlist?:   string[];
+  blocklist?:   string[];
+  check?:       PermissionCheck;
   denyMessage?: string;
 }
 
 export function createPermissionsMiddleware(opts: PermissionsOptions): IMiddleware {
-  const adminSet  = opts.adminIds  ? new Set(opts.adminIds)  : null;
-  const allowSet  = opts.allowlist ? new Set(opts.allowlist) : null;
-  const blockSet  = opts.blocklist ? new Set(opts.blocklist) : null;
-  const denyMsg   = opts.denyMessage ?? "🚫 ليس لديك صلاحية لاستخدام هذا الأمر.";
-  const adminMsg  = "🔒 هذا الأمر مخصص للمشرفين فقط.";
+  const adminSet = opts.adminIds  ? new Set(opts.adminIds)  : null;
+  const allowSet = opts.allowlist ? new Set(opts.allowlist) : null;
+  const blockSet = opts.blocklist ? new Set(opts.blocklist) : null;
+  const denyMsg  = opts.denyMessage ?? "🚫 ليس لديك صلاحية لاستخدام هذا الأمر.";
 
   return {
     name:        "permissions",
@@ -38,22 +31,19 @@ export function createPermissionsMiddleware(opts: PermissionsOptions): IMiddlewa
     handle: async (ctx, command, next) => {
       const userId = ctx.user.id;
 
-      // 1. Blocklist — always denied
+      // 1. Blocklist — silently ignored
       if (blockSet?.has(userId)) {
-        log.warn(`Permissions: user ${userId} is in blocklist — blocked.`);
-        await ctx.reply(denyMsg);
+        log.warn(`Permissions: user ${userId} is in blocklist — blocked silently.`);
         return;
       }
 
-      // 2. Allowlist — only specific users may interact
+      // 2. Allowlist — silently ignored
       if (allowSet && !allowSet.has(userId)) {
-        log.warn(`Permissions: user ${userId} not in allowlist — blocked.`);
-        await ctx.reply(denyMsg);
+        log.warn(`Permissions: user ${userId} not in allowlist — blocked silently.`);
         return;
       }
 
-      // 3. Admin-only command check
-      //    Owner role bypasses this check automatically (hierarchy: owner > admin)
+      // 3. Admin-only command — silently ignored, no reply sent
       if (command?.adminOnly) {
         const isStaticAdmin  = adminSet?.has(userId) ?? false;
         const isDynamicAdmin = opts.adminStore?.has(userId) ?? false;
@@ -62,20 +52,18 @@ export function createPermissionsMiddleware(opts: PermissionsOptions): IMiddlewa
 
         if (!isAdmin) {
           log.warn(
-            `Permissions: user ${userId} tried admin-only command "${command.name}" — denied.`
+            `Permissions: user ${userId} tried admin-only command "${command.name}" — ignored silently.`
           );
-          await ctx.reply(adminMsg);
-          return;
+          return; // no reply
         }
       }
 
-      // 4. Custom check
+      // 4. Custom check — reply only when explicitly configured
       if (opts.check) {
         const allowed = await opts.check(ctx, command);
         if (!allowed) {
           log.warn(
-            `Permissions: user ${userId} failed custom check ` +
-            `for "${command?.name ?? "(no-command)"}".`
+            `Permissions: user ${userId} failed custom check for "${command?.name ?? "(no-command)"}".`
           );
           await ctx.reply(denyMsg);
           return;
