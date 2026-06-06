@@ -48,8 +48,9 @@ interface IMiraiTransportService {
 const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐀𝐃𝐌𝐈𝐍𝐒🪽↴";
 
 function getApi(pluginCtx: IPluginContext): IFcaApiAdmin | null {
-  const transport = pluginCtx.consumeService<IMiraiTransportService>("mirai-transport");
-  return transport?.getApi?.() ?? null;
+  const primary = pluginCtx.consumeService<IMiraiTransportService>("mirai-transport")?.getApi?.() ?? null;
+  if (primary) return primary;
+  return pluginCtx.consumeService<IMiraiTransportService>("mirai-transport-secondary")?.getApi?.() ?? null;
 }
 
 function fetchThreadInfo(api: IFcaApiAdmin, threadID: string): Promise<ThreadInfo> {

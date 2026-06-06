@@ -135,7 +135,9 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐈𝐃𝐀𝐑𝐀🪽↴";
 
 function getApi(pCtx: IPluginContext): IFcaManagement | null {
-  return pCtx.consumeService<IMiraiService>("mirai-transport")?.getApi?.() ?? null;
+  const primary = pCtx.consumeService<IMiraiService>("mirai-transport")?.getApi?.() ?? null;
+  if (primary) return primary;
+  return pCtx.consumeService<IMiraiService>("mirai-transport-secondary")?.getApi?.() ?? null;
 }
 
 async function assertGroupAdmin(
@@ -616,29 +618,35 @@ class ManagementPlugin implements IPlugin {
       pCtx.logger.info(`Command "${cmd.name}" registered (aliases: ${cmd.aliases?.join(", ")}).`);
     }
 
-    // ── Event-driven protection (replaces polling) ─────────────────────────
-    const mirai = pCtx.consumeService<IMiraiService>("mirai-transport");
-    if (mirai?.addRawEventListener) {
+    // ── Event-driven protection (primary + secondary transports) ───────────
+    const mirai    = pCtx.consumeService<IMiraiService>("mirai-transport");
+    const mirai2   = pCtx.consumeService<IMiraiService>("mirai-transport-secondary");
+    const hasAny   = mirai?.addRawEventListener || mirai2?.addRawEventListener;
+
+    if (hasAny) {
       this.protectionHandler = createProtectionHandler(pCtx, store);
-      mirai.addRawEventListener(this.protectionHandler);
+      if (mirai?.addRawEventListener)  mirai.addRawEventListener(this.protectionHandler);
+      if (mirai2?.addRawEventListener) mirai2.addRawEventListener(this.protectionHandler);
       pCtx.logger.info(
-        "ManagementPlugin enabled — event-driven protection active " +
-        "(log:thread-name + log:user-nickname)."
+        "ManagementPlugin enabled — event-driven protection active on " +
+        [mirai ? "primary" : null, mirai2 ? "secondary" : null].filter(Boolean).join(" + ") +
+        " (log:thread-name + log:user-nickname)."
       );
     } else {
       pCtx.logger.warn(
-        "ManagementPlugin: mirai-transport not available or missing addRawEventListener. " +
-        "Protection events disabled."
+        "ManagementPlugin: no mirai-transport available. Protection events disabled."
       );
     }
   }
 
   async onDisable(): Promise<void> {
     if (this.protectionHandler) {
-      const mirai = this.ctx.consumeService<IMiraiService>("mirai-transport");
+      const mirai  = this.ctx.consumeService<IMiraiService>("mirai-transport");
+      const mirai2 = this.ctx.consumeService<IMiraiService>("mirai-transport-secondary");
       mirai?.removeRawEventListener?.(this.protectionHandler);
+      mirai2?.removeRawEventListener?.(this.protectionHandler);
       this.protectionHandler = null;
-      this.ctx.logger.info("ManagementPlugin: protection handler unregistered.");
+      this.ctx.logger.info("ManagementPlugin: protection handler unregistered from all transports.");
     }
     saveStore(this.store);
     this.ctx.logger.info("ManagementPlugin disabled — store saved.");
