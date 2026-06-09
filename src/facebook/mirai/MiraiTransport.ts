@@ -35,21 +35,29 @@ export class MiraiTransport implements ISystem {
   /** Unique system name — configurable so multiple instances can coexist in Bot. */
   readonly name: string;
 
-  private readonly appState: FcaCookie[];
-  private api:              FcaApi | null       = null;
-  private stopListenFn:     (() => void) | null  = null;
-  private eventHandler:     FcaEventHandler | null = null;
-  private rawListeners:     FcaEventHandler[]    = [];
-  private running           = false;
-  private reconnectTimer:   ReturnType<typeof setTimeout> | null = null;
-  private loginAttempts     = 0;
-  private listenerStartMs   = 0;
+  private readonly appState:    FcaCookie[];
+  private readonly initDelayMs: number;
+  private api:                  FcaApi | null        = null;
+  private stopListenFn:         (() => void) | null   = null;
+  private eventHandler:         FcaEventHandler | null = null;
+  private rawListeners:         FcaEventHandler[]     = [];
+  private running               = false;
+  private reconnectTimer:       ReturnType<typeof setTimeout> | null = null;
+  private loginAttempts         = 0;
+  private listenerStartMs       = 0;
 
   private static readonly MAX_LOGIN_ATTEMPTS  = 5;
+  /** Max times a FATAL Facebook error triggers a retry before we stop permanently.
+   *  Transient 1357031 errors can be caused by a secondary account logging in from
+   *  the same IP — allow a couple of retries before treating it as genuine expiry. */
+  private static readonly MAX_FATAL_RETRIES   = 2;
   private static readonly STABLE_LISTEN_MS    = 30_000;
   private static readonly BASE_LOGIN_DELAY_MS = 5_000;
   private static readonly MAX_LOGIN_DELAY_MS  = 120_000;
 
+  // autoReconnect:false — we own all reconnection logic via scheduleReLogin;
+  // avoids a double-reconnect race where fca-unofficial and our code both try
+  // to reconnect at the same time after an MQTT drop.
   private static readonly FCA_OPTIONS: Record<string, unknown> = {
     logLevel:          "silent",
     selfListen:        false,
@@ -58,39 +66,55 @@ export class MiraiTransport implements ISystem {
     forceLogin:        false,
     autoMarkDelivered: true,
     autoMarkRead:      false,
-    autoReconnect:     true,
+    autoReconnect:     false,
   };
 
   /**
-   * @param appState  Facebook session cookies
-   * @param systemName  Unique name for ISystem registry — defaults to "mirai-transport".
-   *                    Pass a different name (e.g. "mirai-transport-secondary") when
-   *                    registering a second account so Bot.register() doesn't conflict.
+   * @param appState      Facebook session cookies.
+   * @param systemName    Unique ISystem name. Use "mirai-transport-secondary" for
+   *                      account #2 so Bot.register() does not throw on duplicate names.
+   * @param initDelayMs   Milliseconds to wait before the first login attempt.
+   *                      Set ≥5000 for secondary accounts to stagger Facebook logins
+   *                      and avoid triggering rate-limits or MQTT interference.
    */
-  constructor(appState: FcaCookie[], systemName = "mirai-transport") {
-    this.appState = appState;
-    this.name     = systemName;
+  constructor(appState: FcaCookie[], systemName = "mirai-transport", initDelayMs = 0) {
+    this.appState    = appState;
+    this.name        = systemName;
+    this.initDelayMs = initDelayMs;
   }
 
-  setEventHandler(handler: FcaEventHandler): void {
-    this.eventHandler = handler;
-  }
+  // ── Public accessors ─────────────────────────────────────────────────────
+
+  setEventHandler(handler: FcaEventHandler): void { this.eventHandler = handler; }
 
   addRawEventListener(fn: FcaEventHandler): void {
-    if (!this.rawListeners.includes(fn)) {
-      this.rawListeners.push(fn);
-    }
+    if (!this.rawListeners.includes(fn)) this.rawListeners.push(fn);
   }
 
   removeRawEventListener(fn: FcaEventHandler): void {
     this.rawListeners = this.rawListeners.filter(l => l !== fn);
   }
 
-  getApi(): FcaApi | null         { return this.api; }
-  getCurrentUserId(): string      { return this.api?.getCurrentUserID() ?? ""; }
-  getAppState(): FcaCookie[]      { return this.api?.getAppState() ?? this.appState; }
+  getApi():          FcaApi | null { return this.api; }
+  getCurrentUserId(): string       { return this.api?.getCurrentUserID() ?? ""; }
+  getAppState():     FcaCookie[]   { return this.api?.getAppState() ?? this.appState; }
+
+  /** True when the fca-unofficial API object is active (MQTT listener running). */
+  isConnected(): boolean { return this.api !== null; }
+
+  /** True while this transport is allowed to (re)connect. */
+  isRunning(): boolean { return this.running; }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   async initialize(): Promise<void> {
+    if (this.initDelayMs > 0) {
+      log.info(
+        `MiraiTransport [${this.name}]: staggering login by ${this.initDelayMs}ms ` +
+        `to avoid Facebook rate-limiting / MQTT interference between accounts.`,
+      );
+      await new Promise<void>(r => setTimeout(r, this.initDelayMs));
+    }
     this.running = true;
     log.info(`MiraiTransport [${this.name}]: initializing…`, { cookieCount: this.appState.length });
     await this.doLogin();
@@ -104,6 +128,23 @@ export class MiraiTransport implements ISystem {
     this.rawListeners = [];
     log.info(`MiraiTransport [${this.name}]: destroyed.`);
   }
+
+  /**
+   * External restart — resets all retry counters and forces a fresh login attempt.
+   * Called by ReconnectManager after it successfully refreshes credentials, bridging
+   * the gap between "credentials valid" and "MQTT actually reconnected".
+   */
+  async restart(): Promise<void> {
+    log.info(`MiraiTransport [${this.name}]: external restart requested — resetting retry counters.`);
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.stopListening();
+    this.api           = null;
+    this.loginAttempts = 0;
+    this.running       = true;
+    await this.doLogin();
+  }
+
+  // ── Private helpers ───────────────────────────────────────────────────────
 
   private getUserIdFromAppState(): string {
     const cookie = this.appState.find(c => c.key === "c_user");
@@ -187,10 +228,33 @@ export class MiraiTransport implements ISystem {
         }
 
         if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
-          log.warn(`MiraiTransport [${this.name}]: FATAL error — AppState expired.`, { fbErrorCode: errCode });
-          this.running = false;
+          // FATAL Facebook error on the MQTT stream (e.g. 1357031 = session interrupted).
+          //
+          // KEY INSIGHT: these can be TRANSIENT — when a second account logs in from the
+          // same Railway IP, Facebook's MQTT broker can send a 1357031 to the first
+          // account's existing connection as a side-effect of the new login.
+          //
+          // Strategy: allow MAX_FATAL_RETRIES retries before treating it as a genuine
+          // AppState expiry that requires manual credential rotation.
           this.stopListening();
           this.api = null;
+
+          if (this.loginAttempts < MiraiTransport.MAX_FATAL_RETRIES) {
+            log.warn(
+              `MiraiTransport [${this.name}]: FATAL fb error ${errCode} — ` +
+              `scheduling retry (${this.loginAttempts + 1}/${MiraiTransport.MAX_FATAL_RETRIES}). ` +
+              `This may be a transient error caused by multi-account login.`,
+              { fbErrorCode: errCode },
+            );
+            this.scheduleReLogin("fatal-fb-error");
+          } else {
+            log.error(
+              `MiraiTransport [${this.name}]: FATAL fb error ${errCode} persists after ` +
+              `${this.loginAttempts} retries — AppState is likely expired. Stopping permanently.`,
+              { fbErrorCode: errCode },
+            );
+            this.running = false;
+          }
           return;
         }
 
@@ -205,7 +269,7 @@ export class MiraiTransport implements ISystem {
 
       if (!this.running || !event) return;
 
-      log.info(`MiraiTransport [${this.name}]: raw event received.`, { type: event.type });
+      log.debug(`MiraiTransport [${this.name}]: raw event received.`, { type: event.type });
 
       try {
         this.eventHandler?.(event);
@@ -241,7 +305,7 @@ export class MiraiTransport implements ISystem {
     this.loginAttempts++;
 
     if (this.loginAttempts > MiraiTransport.MAX_LOGIN_ATTEMPTS) {
-      log.warn(`MiraiTransport [${this.name}]: max login attempts reached.`);
+      log.warn(`MiraiTransport [${this.name}]: max login attempts (${MiraiTransport.MAX_LOGIN_ATTEMPTS}) reached — stopped.`);
       return;
     }
 
