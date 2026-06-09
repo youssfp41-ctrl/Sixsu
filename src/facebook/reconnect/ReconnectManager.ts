@@ -26,8 +26,10 @@ export class ReconnectManager implements ISystem {
   private readonly guard:   ReconnectGuard;
   private readonly records  = new Map<string, ReconnectRecord>();
 
-  private monitor:     SessionHealthMonitor | null = null;
-  private customCheck: HealthCheckFn | null = null;
+  private monitor:      SessionHealthMonitor | null = null;
+  private customCheck:  HealthCheckFn | null = null;
+  /** Called after auth credentials are refreshed so the transport can re-connect MQTT. */
+  private restartHook:  ((accountId: string) => Promise<void>) | null = null;
   private readonly opts: Required<ReconnectManagerOptions>;
 
   constructor(
@@ -52,9 +54,20 @@ export class ReconnectManager implements ISystem {
     });
   }
 
-  /** Override the default health check (just checks isAuthenticated). */
+  /** Override the default health check (checks MQTT connectivity instead of just session). */
   setHealthCheck(fn: HealthCheckFn): this {
     this.customCheck = fn;
+    return this;
+  }
+
+  /**
+   * Register a callback that is invoked after credentials are successfully refreshed.
+   * Use this to bridge the auth layer and the MQTT transport layer: without this hook,
+   * ReconnectManager refreshes credentials but MQTT stays disconnected because
+   * MiraiTransport is not aware of the credential refresh.
+   */
+  setRestartHook(fn: (accountId: string) => Promise<void>): this {
+    this.restartHook = fn;
     return this;
   }
 
@@ -72,10 +85,6 @@ export class ReconnectManager implements ISystem {
 
   // ─── Public API ────────────────────────────────────────────────────────────
 
-  /**
-   * Trigger a reconnect for a specific account immediately.
-   * Respects the guard — blocked accounts are skipped.
-   */
   async reconnect(accountId: string): Promise<boolean> {
     if (!this.guard.isAllowed(accountId)) {
       const until = this.guard.blockedUntil(accountId);
@@ -130,7 +139,6 @@ export class ReconnectManager implements ISystem {
 
       this.guard.record(accountId);
 
-      // Re-check guard after sleep (may have been blocked by then)
       if (!this.guard.isAllowed(accountId)) {
         log.warn(`[${accountId}] Guard blocked during retry loop.`);
         this.setStatus(accountId, ReconnectStatus.BLOCKED);
@@ -173,7 +181,6 @@ export class ReconnectManager implements ISystem {
       }
     }
 
-    // All attempts exhausted
     this.setStatus(accountId, ReconnectStatus.FAILED);
     record.nextAttemptAt = null;
 
@@ -198,7 +205,7 @@ export class ReconnectManager implements ISystem {
       return { success: false, error: result.error ?? "AuthManager returned failure" };
     }
 
-    log.info(`[${accountId}] Login succeeded. Saving session...`);
+    log.info(`[${accountId}] Auth login succeeded. Saving session...`);
 
     try {
       await this.session.saveSession(accountId);
@@ -206,6 +213,20 @@ export class ReconnectManager implements ISystem {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`[${accountId}] Session save failed after login: ${msg}`);
       return { success: false, error: `Session save failed: ${msg}` };
+    }
+
+    // Bridge the auth layer to the MQTT transport layer.
+    // Without this, credentials are refreshed but the transport stays disconnected.
+    if (this.restartHook) {
+      try {
+        log.info(`[${accountId}] Invoking transport restart hook to reconnect MQTT...`);
+        await this.restartHook(accountId);
+        log.info(`[${accountId}] Transport restart hook completed.`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Log but don't fail — session was saved; transport will self-recover via scheduleReLogin
+        log.warn(`[${accountId}] Transport restart hook threw: ${msg}`);
+      }
     }
 
     return { success: true };
@@ -225,7 +246,6 @@ export class ReconnectManager implements ISystem {
       onDisconnected: (accountId) => {
         log.warn(`[${accountId}] Health monitor detected disconnection.`);
 
-        // Only trigger if not already retrying or blocked.
         const record = this.records.get(accountId);
         if (
           record &&
@@ -235,8 +255,6 @@ export class ReconnectManager implements ISystem {
           return;
         }
 
-        // Fire-and-forget with explicit error handling so rejections don't
-        // surface as unhandledRejection events on the process.
         this.reconnect(accountId).catch((err: unknown) => {
           log.error(
             `[${accountId}] Reconnect triggered by health monitor threw unexpectedly.`,
