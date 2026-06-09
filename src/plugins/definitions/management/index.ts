@@ -239,7 +239,7 @@ async function showHelp(ctx: Context): Promise<void> {
     HEADER, "",
     `⌯ اسم قروب — تغيير اسم القروب`,
     `  ↳ ${prefix}اسم [الاسم الجديد]`, "",
-    `⌯ اسم بوت — تغيير اسم البوت في القروب (للمالك فقط)`,
+    `⌯ اسم بوت — تغيير اسم البوت في القروب (للأدمن فقط)`,
     `  ↳ ${prefix}بوت [الاسم]`, "",
     `⌯ كنية — تعيين كنية لجميع الأعضاء`,
     `  ↳ ${prefix}كنية [الكنية]`, "",
@@ -281,8 +281,8 @@ async function handleBotName(
   repo:  IGroupSettingsRepository | null,
 ): Promise<void> {
   await ctx.typingOn();
-  if (!ctx.hasRole("owner")) {
-    await ctx.reply("🔐 تغيير اسم البوت مخصص للمالك فقط.");
+  if (!ctx.hasRole("admin")) {
+    await ctx.reply("🚫 هذا الأمر للأدمن فقط.");
     return;
   }
 
