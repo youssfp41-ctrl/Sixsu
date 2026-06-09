@@ -115,8 +115,8 @@ async function handleRemove(ctx: Context, pCtx: IPluginContext): Promise<void> {
     await ctx.reply([
       HEADER, "",
       "⚠️ الرجاء تحديد ID أو رقم الأدمن من القائمة.",
-      "مثال: /مالك حذف 1234567890",
-      "أو:    /مالك حذف 2",
+      "مثال: /ادمن حذف 1234567890",
+      "أو:    /ادمن حذف 2",
     ].join("\n"));
     return;
   }
@@ -183,7 +183,7 @@ async function handleList(ctx: Context, pCtx: IPluginContext): Promise<void> {
 async function showHelp(ctx: Context): Promise<void> {
   await ctx.reply([
     HEADER, "",
-    "⌯ أوامر المالك (للمالك فقط):", "",
+    "⌯ أوامر إدارة الأدمن (للأدمن فقط):", "",
     "• /مالك اضافة <ID>",
     "  ↳ إضافة مستخدم كأدمن للبوت", "",
     "• /مالك حذف <ID أو رقم>",
@@ -199,7 +199,7 @@ class OwnerPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "owner",
     version:     "2.0.0",
-    description: "إدارة أدمن البوت — إضافة وحذف الأدمن (للمالك فقط). يزامن مع MongoDB.",
+    description: "إدارة أدمن البوت — إضافة وحذف الأدمن (للأدمن فقط). يزامن مع MongoDB.",
     author:      "Sixseven-6677",
   };
 
@@ -216,15 +216,15 @@ class OwnerPlugin implements IPlugin {
     const ownerCommand: ICommand = {
       name:        "مالك",
       aliases:     ["owner", "botadmin"],
-      description: "إدارة أدمن البوت (إضافة/حذف) — للمالك فقط",
+      description: "إدارة أدمن البوت (إضافة/حذف) — للأدمن فقط",
       usage:       "مالك [اضافة <ID> | حذف <ID> | قائمة]",
       category:    "admin",
       adminOnly:   false,
       hidden:      false,
 
       async execute(ctx: Context): Promise<void> {
-        if (!ctx.hasRole("owner")) {
-          await ctx.reply("🔐 هذا الأمر مخصص للمالك فقط.");
+        if (!ctx.hasRole("admin")) {
+          await ctx.reply("🚫 هذا الأمر للأدمن فقط.");
           return;
         }
 
