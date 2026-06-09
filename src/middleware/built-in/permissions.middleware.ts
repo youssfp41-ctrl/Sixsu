@@ -43,18 +43,24 @@ export function createPermissionsMiddleware(opts: PermissionsOptions): IMiddlewa
         return;
       }
 
-      // 3. Admin-only command — silently ignored, no reply sent
+      // 3. Admin-only command
       if (command?.adminOnly) {
-        const isStaticAdmin  = adminSet?.has(userId) ?? false;
-        const isDynamicAdmin = opts.adminStore?.has(userId) ?? false;
+        // Check all three admin sources for consistency:
+        //   A) Static adminIds set (from BOT_ADMIN_IDS env var)
+        //   B) Dynamic AdminStore (runtime-added admins, backed by MongoDB)
+        //   C) ctx.hasRole("admin") — MongoDB role OR AdminStore override in ContextBuilder
+        //   D) ctx.hasRole("owner") — owners always have all permissions
+        const isStaticAdmin  = adminSet?.has(userId)         ?? false;
+        const isDynamicAdmin = opts.adminStore?.has(userId)  ?? false;
+        const isRoleAdmin    = ctx.hasRole("admin");   // includes AdminStore override
         const isOwner        = ctx.hasRole("owner");
-        const isAdmin        = isStaticAdmin || isDynamicAdmin || isOwner;
+        const isAdmin        = isStaticAdmin || isDynamicAdmin || isRoleAdmin || isOwner;
 
         if (!isAdmin) {
           log.warn(
             `Permissions: user ${userId} tried admin-only command "${command.name}" — ignored silently.`
           );
-          return; // no reply
+          return;
         }
       }
 

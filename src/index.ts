@@ -42,6 +42,9 @@ import { LockdownStore, createLockdownMiddleware } from "./middleware/built-in/l
 import { AdminStore }                        from "./middleware/built-in/admin-store";
 import { DatabaseManager }                   from "./database/DatabaseManager";
 import { UserRepository }                    from "./database/repositories/user.repository";
+import { BotAdminRepository }               from "./database/repositories/botadmin.repository";
+import { GroupSettingsRepository }          from "./database/repositories/group-settings.repository";
+import { BanRepository }                    from "./database/repositories/ban.repository";
 import { CacheManager }                      from "./cache/CacheManager";
 import { createCacheProvider }               from "./cache/providers/createProvider";
 import { UserService }                       from "./users/UserService";
@@ -81,33 +84,28 @@ function isValidMongoUri(uri: string): boolean {
 }
 
 // ─── Per-account setup ────────────────────────────────────────────────────────
-//
-// Each Facebook account gets its own MiraiTransport (unique system name),
-// MiraiSender, FcaEventAdapter, and FacebookGateway so replies always use
-// the correct account.  All accounts share the same command pipeline.
 
 interface AccountSetupOptions {
   label:       string;
   credentials: AuthCredentials;
   userSvc:     UserService;
+  adminStore:  AdminStore;
   bot:         Bot;
   isPrimary:   boolean;
 }
 
 function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
-  const { label, credentials, userSvc, bot, isPrimary } = opts;
+  const { label, credentials, userSvc, adminStore, bot, isPrimary } = opts;
 
   const cookieClient = new CookieHttpClient(credentials.appState);
   const botUserId    = cookieClient.getUserId();
 
-  // Each transport gets a unique system name so Bot.register() doesn't conflict
   const systemName   = isPrimary ? "mirai-transport" : `mirai-transport-${label}`;
   const transport    = new MiraiTransport(credentials.appState, systemName);
   const sender: ISender = new MiraiSender(transport);
 
   log.info(`Account [${label}]: transport created.`, { botUserId, systemName });
 
-  // Primary account drives group join/leave/protection handler singletons
   if (isPrimary) {
     setGroupSender(sender);
     setGroupBotUserId(botUserId);
@@ -120,8 +118,10 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
   const gateway     = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
 
+  // Wire context builder — owner IDs, user service, and admin store
   gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
   gateway.getContextBuilder().setUserService(userSvc);
+  gateway.getContextBuilder().setAdminStore(adminStore);  // Critical fix
 
   const adapter = new FcaEventAdapter(botUserId);
 
@@ -194,14 +194,20 @@ async function bootstrap(): Promise<void> {
   const cache = new CacheManager({ provider: await createCacheProvider() });
   bot.register(cache);
 
-  const mongoUri = config.database.mongoUri;
-  if (isValidMongoUri(mongoUri)) {
+  const mongoUri    = config.database.mongoUri;
+  const mongoEnabled = isValidMongoUri(mongoUri);
+
+  if (mongoEnabled) {
     bot.register(new DatabaseManager());
     log.info("Database: MongoDB enabled.");
   } else if (mongoUri) {
-    log.warn("Database: MONGODB_URI looks invalid — skipping.");
+    log.warn("Database: MONGODB_URI looks invalid — skipping. Set a valid mongodb+srv:// URI.");
   } else {
-    log.info("Database: no MONGODB_URI — running without persistence.");
+    log.warn(
+      "Database: no MONGODB_URI set — running without persistence. " +
+      "Admins added at runtime will be lost on restart. " +
+      "Set MONGODB_URI on Railway to enable full persistence."
+    );
   }
 
   const scheduler = new TaskScheduler();
@@ -296,12 +302,18 @@ async function bootstrap(): Promise<void> {
   const secondaryCreds = auth.getCredentials("secondary");
 
   if (primaryCreds) {
-    const t = bootFcaAccount({ label: "primary", credentials: primaryCreds, userSvc, bot, isPrimary: true });
+    const t = bootFcaAccount({
+      label: "primary", credentials: primaryCreds,
+      userSvc, adminStore, bot, isPrimary: true,
+    });
     transports.push({ label: "primary", transport: t });
   }
 
   if (secondaryCreds) {
-    const t = bootFcaAccount({ label: "secondary", credentials: secondaryCreds, userSvc, bot, isPrimary: false });
+    const t = bootFcaAccount({
+      label: "secondary", credentials: secondaryCreds,
+      userSvc, adminStore, bot, isPrimary: false,
+    });
     transports.push({ label: "secondary", transport: t });
     log.info("✅ Two accounts active — bot running on primary + secondary Facebook accounts.");
   }
@@ -335,15 +347,15 @@ async function bootstrap(): Promise<void> {
 
   const svcReg = pluginManager.getServiceRegistry();
   svcReg.provide("command-registry", registry,      "core");
-  svcReg.provide("ban-store",        banStore,        "core");
-  svcReg.provide("lockdown-store",   lockdownStore,   "core");
-  svcReg.provide("admin-store",      adminStore,      "core");
-  svcReg.provide("user-service",     userSvc,         "core");
+  svcReg.provide("ban-store",        banStore,       "core");
+  svcReg.provide("lockdown-store",   lockdownStore,  "core");
+  svcReg.provide("admin-store",      adminStore,     "core");
+  svcReg.provide("user-service",     userSvc,        "core");
 
   if (transports[0]) {
-    svcReg.provide("mirai-transport",   transports[0].transport, "core");
+    svcReg.provide("mirai-transport",  transports[0].transport, "core");
     const primarySender = new MiraiSender(transports[0].transport);
-    svcReg.provide("facebook-sender",  primarySender,           "core");
+    svcReg.provide("facebook-sender", primarySender,            "core");
   }
   if (transports[1]) {
     svcReg.provide("mirai-transport-secondary", transports[1].transport, "core");
@@ -358,9 +370,14 @@ async function bootstrap(): Promise<void> {
   // 8. Webhook routes (primary account handles webhook verification)
   if (transports[0]) {
     const conn    = new FacebookConnection();
-    const gateway = new FacebookGateway(conn, new MiraiSender(transports[0].transport), new FacebookEventNormalizer());
+    const gateway = new FacebookGateway(
+      conn,
+      new MiraiSender(transports[0].transport),
+      new FacebookEventNormalizer()
+    );
     gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
     gateway.getContextBuilder().setUserService(userSvc);
+    gateway.getContextBuilder().setAdminStore(adminStore);  // Critical fix
     conn.connect();
 
     app.use("/webhook", createWebhookRouter(gateway, {
@@ -372,13 +389,49 @@ async function bootstrap(): Promise<void> {
   app.use(notFoundHandler);
   app.use(httpErrorHandler);
 
-  // 9. Start bot
+  // 9. Start bot (initializes all registered systems, including DatabaseManager)
   await bot.start();
 
+  // 10. Post-start: wire MongoDB repositories to stores (DB is now connected)
+  if (mongoEnabled) {
+    try {
+      const botAdminRepo       = new BotAdminRepository();
+      const groupSettingsRepo  = new GroupSettingsRepository();
+      const banRepo            = new BanRepository();
+
+      // Wire stores → MongoDB
+      adminStore.setRepository(botAdminRepo);
+      lockdownStore.setRepository(groupSettingsRepo);
+      banStore.setRepository(banRepo);
+
+      // Load persisted data from MongoDB into in-memory stores
+      await Promise.all([
+        adminStore.loadFromDatabase(),
+        lockdownStore.loadFromDatabase(),
+        banStore.loadFromDatabase(),
+      ]);
+
+      // Expose repositories for plugins (management plugin needs group-settings-repo)
+      svcReg.provide("group-settings-repo", groupSettingsRepo, "core");
+      svcReg.provide("ban-repo",            banRepo,           "core");
+      svcReg.provide("botadmin-repo",       botAdminRepo,      "core");
+
+      log.info("Post-start: all stores wired to MongoDB and loaded.", {
+        admins:        adminStore.size(),
+        lockedThreads: lockdownStore.lockedCount,
+        activeBans:    banStore.size,
+      });
+    } catch (err) {
+      log.error("Post-start: failed to wire MongoDB repositories.", err);
+    }
+  }
+
   log.info("── BOT READY ────────────────────────────────────────────────", {
-    accounts: transports.map(({ label, transport: t }) => ({ label, userId: t.getCurrentUserId() })),
-    prefix:   config.bot.prefix,
-    nodeEnv:  config.nodeEnv,
+    accounts:    transports.map(({ label, transport: t }) => ({ label, userId: t.getCurrentUserId() })),
+    prefix:      config.bot.prefix,
+    nodeEnv:     config.nodeEnv,
+    mongoDb:     mongoEnabled ? "connected" : "disabled — set MONGODB_URI for persistence",
+    adminCount:  adminStore.size(),
   });
 
   if (process.send) process.send("ready");

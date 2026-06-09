@@ -9,16 +9,14 @@ export interface BanEntry {
   userId:    string;
   reason?:   string;
   bannedAt:  Date;
-  /** null = permanent ban */
   expiresAt: Date | null;
   bannedBy?: string;
 }
 
 export interface BanOptions {
-  reason?:      string;
-  /** Duration in ms. Omit for a permanent ban. */
-  durationMs?:  number;
-  bannedBy?:    string;
+  reason?:     string;
+  durationMs?: number;
+  bannedBy?:   string;
 }
 
 export interface BanStoreSummary {
@@ -29,12 +27,45 @@ export interface BanStoreSummary {
   expired:   number;
 }
 
+// ─── MongoDB repo interface (loose coupling) ──────────────────────────────────
+
+interface IBanRepository {
+  findActive(): Promise<BanEntry[]>;
+  upsert(entry: BanEntry): Promise<void>;
+  remove(userId: string): Promise<boolean>;
+  purgeExpired(): Promise<number>;
+}
+
 // ─── BanStore ─────────────────────────────────────────────────────────────────
 
 export class BanStore {
   private readonly bans = new Map<string, BanEntry>();
+  private repo: IBanRepository | null = null;
 
-  /** Ban a user. Overwrites any existing ban. */
+  // ── MongoDB wiring ──────────────────────────────────────────────────────────
+
+  setRepository(repo: IBanRepository): void {
+    this.repo = repo;
+    log.debug("BanStore: MongoDB repository attached.");
+  }
+
+  async loadFromDatabase(): Promise<void> {
+    if (!this.repo) return;
+    try {
+      const active = await this.repo.findActive();
+      for (const entry of active) {
+        this.bans.set(entry.userId, entry);
+      }
+      log.info(`BanStore: loaded from MongoDB — ${active.length} active ban(s).`);
+    } catch (err) {
+      log.warn("BanStore: failed to load from MongoDB — starting with empty store.", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ── Mutations ───────────────────────────────────────────────────────────────
+
   ban(userId: string, opts: BanOptions = {}): BanEntry {
     const entry: BanEntry = {
       userId,
@@ -45,6 +76,15 @@ export class BanStore {
     };
 
     this.bans.set(userId, entry);
+
+    if (this.repo) {
+      this.repo.upsert(entry).catch((err: unknown) => {
+        log.warn("BanStore: MongoDB ban failed — ban is active in memory.", {
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
 
     const expiry = entry.expiresAt
       ? `expires: ${entry.expiresAt.toISOString()}`
@@ -57,26 +97,36 @@ export class BanStore {
     return entry;
   }
 
-  /** Remove a ban. Returns true if the user was banned. */
   unban(userId: string): boolean {
     const had = this.bans.has(userId);
     if (had) {
       this.bans.delete(userId);
+
+      if (this.repo) {
+        this.repo.remove(userId).catch((err: unknown) => {
+          log.warn("BanStore: MongoDB unban failed — user is unban in memory.", {
+            userId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+
       log.info(`Unbanned user ${userId}.`);
     }
     return had;
   }
 
-  /**
-   * Check if a user is currently banned.
-   * Automatically removes expired bans.
-   */
+  // ── Queries ─────────────────────────────────────────────────────────────────
+
   isBanned(userId: string): boolean {
     const entry = this.bans.get(userId);
     if (!entry) return false;
 
     if (entry.expiresAt && Date.now() >= entry.expiresAt.getTime()) {
       this.bans.delete(userId);
+      if (this.repo) {
+        this.repo.remove(userId).catch(() => {});
+      }
       log.info(`Temporary ban expired — user ${userId} is now free.`);
       return false;
     }
@@ -84,13 +134,11 @@ export class BanStore {
     return true;
   }
 
-  /** Get the ban entry (null if not banned or ban expired). */
   getEntry(userId: string): BanEntry | null {
     if (!this.isBanned(userId)) return null;
     return this.bans.get(userId) ?? null;
   }
 
-  /** All current bans (expired ones are automatically purged). */
   getAll(): BanEntry[] {
     const now = Date.now();
     const active: BanEntry[] = [];
@@ -98,6 +146,7 @@ export class BanStore {
     for (const [userId, entry] of this.bans) {
       if (entry.expiresAt && now >= entry.expiresAt.getTime()) {
         this.bans.delete(userId);
+        if (this.repo) this.repo.remove(userId).catch(() => {});
       } else {
         active.push(entry);
       }
@@ -106,27 +155,16 @@ export class BanStore {
     return active;
   }
 
-  /** Summary statistics. */
   summary(): BanStoreSummary {
-    const all     = Array.from(this.bans.values());
-    const now     = Date.now();
-    const active  = all.filter(
-      (e) => !e.expiresAt || now < e.expiresAt.getTime()
-    );
+    const all      = Array.from(this.bans.values());
+    const now      = Date.now();
+    const active   = all.filter((e) => !e.expiresAt || now < e.expiresAt.getTime());
     const expired  = all.length - active.length;
     const permanent = active.filter((e) => !e.expiresAt).length;
     const temporary = active.filter((e) => !!e.expiresAt).length;
-
-    return {
-      total:    all.length,
-      active:   active.length,
-      permanent,
-      temporary,
-      expired,
-    };
+    return { total: all.length, active: active.length, permanent, temporary, expired };
   }
 
-  /** Remove all expired bans from storage. */
   purgeExpired(): number {
     const now     = Date.now();
     let   removed = 0;
@@ -138,24 +176,22 @@ export class BanStore {
     }
     if (removed > 0) {
       log.info(`Purged ${removed} expired ban(s).`);
+      if (this.repo) this.repo.purgeExpired().catch(() => {});
     }
     return removed;
   }
 
-  /** Total number of entries (including expired). */
   get size(): number {
     return this.bans.size;
   }
 }
 
-// ─── Middleware factory ────────────────────────────────────────────────────────
+// ─── Middleware factory ───────────────────────────────────────────────────────
 
 export interface BannedMiddlewareOptions {
-  store: BanStore;
-  /** Custom reply when banned. Receives the BanEntry. */
+  store:    BanStore;
   message?: (entry: BanEntry) => string;
-  /** Don't reply — silently drop the message. Default: false. */
-  silent?: boolean;
+  silent?:  boolean;
 }
 
 export function createBannedMiddleware(opts: BannedMiddlewareOptions): IMiddleware {
@@ -170,7 +206,6 @@ export function createBannedMiddleware(opts: BannedMiddlewareOptions): IMiddlewa
         return;
       }
 
-      // User is banned — build reason text
       const reason = entry.reason ? ` السبب: ${entry.reason}.` : "";
       const expiry = entry.expiresAt
         ? ` انتهاء الحظر: ${entry.expiresAt.toLocaleString()}.`
@@ -187,8 +222,6 @@ export function createBannedMiddleware(opts: BannedMiddlewareOptions): IMiddlewa
           `🚫 أنت محظور من استخدام البوت.${reason}${expiry}`;
         await ctx.reply(msg);
       }
-
-      // Do not call next() — chain stops here
     },
   };
 }

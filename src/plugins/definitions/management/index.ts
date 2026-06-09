@@ -51,27 +51,95 @@ interface IMiraiService {
   getApi(): IFcaManagement | null;
 }
 
-// ─── Persistent store ────────────────────────────────────────────────────────
+// ─── GroupSettings repository interface (loose coupling) ─────────────────────
+
+interface IGroupSettingsRepository {
+  findAll(): Promise<Array<{
+    threadId:         string;
+    protectName:      boolean;
+    lockedName:       string;
+    protectNicknames: boolean;
+    nicknames:        Record<string, string>;
+    botNickname:      string;
+    lockdown:         boolean;
+  }>>;
+  upsert(threadId: string, data: {
+    protectName?:      boolean;
+    lockedName?:       string;
+    protectNicknames?: boolean;
+    nicknames?:        Record<string, string>;
+    botNickname?:      string;
+    lockdown?:         boolean;
+  }): Promise<unknown>;
+}
+
+// ─── File fallback ────────────────────────────────────────────────────────────
 
 const DATA_PATH = path.resolve("data/management-plugin.json");
 
-function loadStore(): ProtectionStore {
+function loadFromFile(): ProtectionStore {
   try {
     if (fs.existsSync(DATA_PATH)) {
       const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as ProtectionStore;
       if (!raw.botNicknames) raw.botNicknames = {};
       return raw;
     }
-  } catch { /* corrupt file — start fresh */ }
+  } catch { /* corrupt — start fresh */ }
   return { threads: {}, botNicknames: {} };
 }
 
-function saveStore(data: ProtectionStore): void {
-  const dir = path.dirname(DATA_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
-  setProtectionStore(data);
+function persistToFile(data: ProtectionStore): void {
+  try {
+    const dir = path.dirname(DATA_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
+  } catch { /* best effort */ }
 }
+
+// ─── Persistent save ──────────────────────────────────────────────────────────
+
+/**
+ * Persist a single thread's state change.
+ * Tries MongoDB first (fire-and-forget). Falls back to file only if no repo.
+ */
+function saveThreadState(
+  store:     ProtectionStore,
+  threadId:  string,
+  repo:      IGroupSettingsRepository | null,
+  log?:      { warn(msg: string, meta?: object): void },
+): void {
+  setProtectionStore(store);
+
+  const state    = store.threads[threadId];
+  const botNick  = store.botNicknames[threadId] ?? "";
+
+  if (repo && state) {
+    repo.upsert(threadId, {
+      protectName:      state.protectName,
+      lockedName:       state.lockedName,
+      protectNicknames: state.protectNicknames,
+      nicknames:        state.nicknames,
+      botNickname:      botNick,
+    }).catch((err: unknown) => {
+      log?.warn("ManagementPlugin: MongoDB upsert failed — falling back to file.", {
+        threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      persistToFile(store);
+    });
+  } else {
+    persistToFile(store);
+  }
+}
+
+/**
+ * Persist all threads (called on plugin disable/unload as a safety flush).
+ */
+function flushAllToFile(store: ProtectionStore): void {
+  persistToFile(store);
+}
+
+// ─── Thread state helpers ─────────────────────────────────────────────────────
 
 function getThreadState(data: ProtectionStore, threadID: string): ThreadState {
   if (!data.threads[threadID]) {
@@ -85,13 +153,12 @@ function getThreadState(data: ProtectionStore, threadID: string): ThreadState {
   return data.threads[threadID]!;
 }
 
-// ─── FCA promise wrappers ────────────────────────────────────────────────────
+// ─── FCA promise wrappers ─────────────────────────────────────────────────────
 
 function fcaGetThreadInfo(api: IFcaManagement, threadID: string): Promise<ThreadInfo> {
   return new Promise((resolve, reject) => {
     api.getThreadInfo(threadID, (err, info) => {
-      if (err) reject(err);
-      else     resolve(info);
+      if (err) reject(err); else resolve(info);
     });
   });
 }
@@ -99,29 +166,24 @@ function fcaGetThreadInfo(api: IFcaManagement, threadID: string): Promise<Thread
 function fcaSetTitle(api: IFcaManagement, title: string, threadID: string): Promise<void> {
   return new Promise((resolve, reject) => {
     api.setTitle(title, threadID, (err) => {
-      if (err) reject(err);
-      else     resolve();
+      if (err) reject(err); else resolve();
     });
   });
 }
 
 function fcaChangeNickname(
-  api:      IFcaManagement,
-  nick:     string,
-  threadID: string,
-  userID:   string,
+  api: IFcaManagement, nick: string, threadID: string, userID: string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     api.changeNickname(nick, threadID, userID, (err) => {
-      if (err) reject(err);
-      else     resolve();
+      if (err) reject(err); else resolve();
     });
   });
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-// ─── Shared utilities ────────────────────────────────────────────────────────
+// ─── Shared utilities ─────────────────────────────────────────────────────────
 
 const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐈𝐃𝐀𝐑𝐀🪽↴";
 
@@ -131,6 +193,14 @@ function getApi(pCtx: IPluginContext): IFcaManagement | null {
   return pCtx.consumeService<IMiraiService>("mirai-transport-secondary")?.getApi?.() ?? null;
 }
 
+/**
+ * assertGroupAdmin — verifies the caller is either:
+ *   (a) a Facebook group admin in this thread, OR
+ *   (b) a bot admin (ctx.hasRole("admin") — includes AdminStore override)
+ *
+ * With the ContextBuilder fix, ctx.hasRole("admin") now correctly reflects
+ * users added via /مالك اضافة, so this check works for bot admins too.
+ */
 async function assertGroupAdmin(
   ctx:  Context,
   api:  IFcaManagement,
@@ -151,7 +221,7 @@ async function assertGroupAdmin(
   }
 
   const isGroupAdmin = info.adminIDs.some((a) => a.id === ctx.user.id);
-  const isBotAdmin   = ctx.hasRole("admin");
+  const isBotAdmin   = ctx.hasRole("admin"); // AdminStore override in ContextBuilder ensures this works
 
   if (!isGroupAdmin && !isBotAdmin) {
     await ctx.reply("🚫 هذا الأمر للأدمن فقط.");
@@ -161,33 +231,27 @@ async function assertGroupAdmin(
   return info;
 }
 
-// ─── /ادارة → curated submenu display ───────────────────────────────────────
+// ─── /ادارة → help ───────────────────────────────────────────────────────────
 
 async function showHelp(ctx: Context): Promise<void> {
   const prefix = config.bot.prefix || "/";
-
   await ctx.reply([
-    HEADER,
-    "",
+    HEADER, "",
     `⌯ اسم قروب — تغيير اسم القروب`,
-    `  ↳ ${prefix}اسم [الاسم الجديد]`,
-    "",
+    `  ↳ ${prefix}اسم [الاسم الجديد]`, "",
     `⌯ اسم بوت — تغيير اسم البوت في القروب (للمالك فقط)`,
-    `  ↳ ${prefix}بوت [الاسم]`,
-    "",
+    `  ↳ ${prefix}بوت [الاسم]`, "",
     `⌯ كنية — تعيين كنية لجميع الأعضاء`,
-    `  ↳ ${prefix}كنية [الكنية]`,
-    "",
+    `  ↳ ${prefix}كنية [الكنية]`, "",
     `⌯ بادئة — عرض البادئة الحالية`,
     `  ↳ ${prefix}بادئة`,
   ].join("\n"));
 }
 
-// ─── Sub-command handlers ────────────────────────────────────────────────────
+// ─── Sub-command handlers ─────────────────────────────────────────────────────
 
 async function handleGroupName(ctx: Context, pCtx: IPluginContext): Promise<void> {
   await ctx.typingOn();
-
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
@@ -210,9 +274,13 @@ async function handleGroupName(ctx: Context, pCtx: IPluginContext): Promise<void
   }
 }
 
-async function handleBotName(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
+async function handleBotName(
+  ctx:   Context,
+  pCtx:  IPluginContext,
+  store: ProtectionStore,
+  repo:  IGroupSettingsRepository | null,
+): Promise<void> {
   await ctx.typingOn();
-
   if (!ctx.hasRole("owner")) {
     await ctx.reply("🔐 تغيير اسم البوت مخصص للمالك فقط.");
     return;
@@ -230,10 +298,7 @@ async function handleBotName(ctx: Context, pCtx: IPluginContext, store: Protecti
     return;
   }
 
-  if (!info.isGroup) {
-    await ctx.reply("⚠️ هذا الأمر يعمل في القروبات فقط.");
-    return;
-  }
+  if (!info.isGroup) { await ctx.reply("⚠️ هذا الأمر يعمل في القروبات فقط."); return; }
 
   const newNick = ctx.args.slice(0).join(" ").trim();
   if (!newNick) {
@@ -247,11 +312,12 @@ async function handleBotName(ctx: Context, pCtx: IPluginContext, store: Protecti
   }
 
   const botId = api.getCurrentUserID();
-
   try {
     await fcaChangeNickname(api, newNick, ctx.thread.id, botId);
     store.botNicknames[ctx.thread.id] = newNick;
-    saveStore(store);
+    // Ensure thread state exists before saving
+    getThreadState(store, ctx.thread.id);
+    saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
     pCtx.logger.info("Bot nickname set and protected.", { threadID: ctx.thread.id, botId, newNick });
     await ctx.reply(
       `${HEADER}\n\n✅ تم تعيين اسم البوت وحمايته:\n"${newNick}"\n\n🔒 أي محاولة لتغييره ستُعاد تلقائياً.`
@@ -262,9 +328,13 @@ async function handleBotName(ctx: Context, pCtx: IPluginContext, store: Protecti
   }
 }
 
-async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
+async function handleSetNickname(
+  ctx:   Context,
+  pCtx:  IPluginContext,
+  store: ProtectionStore,
+  repo:  IGroupSettingsRepository | null,
+): Promise<void> {
   await ctx.typingOn();
-
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
@@ -279,13 +349,11 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Prot
 
   const botId   = api.getCurrentUserID();
   const botNick = store.botNicknames[ctx.thread.id] ?? null;
-
   const participants = info.participantIDs.filter((id) => id !== botId);
 
   await ctx.reply(`⏳ جارٍ تعيين الكنية لـ ${participants.length} عضو...`);
 
-  let ok = 0;
-  let failed = 0;
+  let ok = 0, failed = 0;
   const threadState = getThreadState(store, ctx.thread.id);
 
   for (const uid of participants) {
@@ -304,7 +372,7 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Prot
     } catch { /* best effort */ }
   }
 
-  saveStore(store);
+  saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
   pCtx.logger.info("Nicknames set.", { threadID: ctx.thread.id, nick, ok, failed });
 
   const lines = [HEADER, "", `✅ تم تعيين الكنية: "${nick}"`, `⌯ نجح: ${ok} عضو`];
@@ -313,13 +381,17 @@ async function handleSetNickname(ctx: Context, pCtx: IPluginContext, store: Prot
   await ctx.reply(lines.join("\n"));
 }
 
-async function handleProtection(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
+async function handleProtection(
+  ctx:   Context,
+  pCtx:  IPluginContext,
+  store: ProtectionStore,
+  repo:  IGroupSettingsRepository | null,
+): Promise<void> {
   const target = ctx.getArg(0);
-
   if (target === "اسم") {
-    await handleProtectName(ctx, pCtx, store);
+    await handleProtectName(ctx, pCtx, store, repo);
   } else if (target === "كنيات") {
-    await handleProtectNicknames(ctx, pCtx, store);
+    await handleProtectNicknames(ctx, pCtx, store, repo);
   } else {
     await ctx.reply(
       `${HEADER}\n\n⚠️ حدد نوع الحماية:\n` +
@@ -329,7 +401,12 @@ async function handleProtection(ctx: Context, pCtx: IPluginContext, store: Prote
   }
 }
 
-async function handleProtectName(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
+async function handleProtectName(
+  ctx:   Context,
+  pCtx:  IPluginContext,
+  store: ProtectionStore,
+  repo:  IGroupSettingsRepository | null,
+): Promise<void> {
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
@@ -341,19 +418,24 @@ async function handleProtectName(ctx: Context, pCtx: IPluginContext, store: Prot
   if (!threadState.protectName) {
     threadState.protectName = true;
     threadState.lockedName  = info.name;
-    saveStore(store);
+    saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
     pCtx.logger.info("Name protection enabled.", { threadID: ctx.thread.id, lockedName: info.name });
     await ctx.reply(`${HEADER}\n\n🔒 تم تفعيل حماية اسم القروب.\n⌯ الاسم المحمي: "${info.name}"`);
   } else {
     threadState.protectName = false;
     threadState.lockedName  = "";
-    saveStore(store);
+    saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
     pCtx.logger.info("Name protection disabled.", { threadID: ctx.thread.id });
     await ctx.reply(`${HEADER}\n\n🔓 تم إيقاف حماية اسم القروب.`);
   }
 }
 
-async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
+async function handleProtectNicknames(
+  ctx:   Context,
+  pCtx:  IPluginContext,
+  store: ProtectionStore,
+  repo:  IGroupSettingsRepository | null,
+): Promise<void> {
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
@@ -368,7 +450,7 @@ async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store:
       return;
     }
     threadState.protectNicknames = true;
-    saveStore(store);
+    saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
     pCtx.logger.info("Nickname protection enabled.", { threadID: ctx.thread.id });
     await ctx.reply(
       `${HEADER}\n\n🔒 تم تفعيل حماية الكنيات.\n` +
@@ -376,15 +458,19 @@ async function handleProtectNicknames(ctx: Context, pCtx: IPluginContext, store:
     );
   } else {
     threadState.protectNicknames = false;
-    saveStore(store);
+    saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
     pCtx.logger.info("Nickname protection disabled.", { threadID: ctx.thread.id });
     await ctx.reply(`${HEADER}\n\n🔓 تم إيقاف حماية الكنيات.`);
   }
 }
 
-async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: ProtectionStore): Promise<void> {
+async function handleClearNicknames(
+  ctx:   Context,
+  pCtx:  IPluginContext,
+  store: ProtectionStore,
+  repo:  IGroupSettingsRepository | null,
+): Promise<void> {
   await ctx.typingOn();
-
   const target = ctx.getArg(0);
   if (target !== "كنيات") {
     await ctx.reply("⚠️ هل تقصد: /تنظيف كنيات");
@@ -399,13 +485,11 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: P
 
   const botId   = api.getCurrentUserID();
   const botNick = store.botNicknames[ctx.thread.id] ?? null;
-
   const participants = info.participantIDs.filter((id) => id !== botId);
+
   await ctx.reply(`⏳ جارٍ مسح الكنيات لـ ${participants.length} عضو...`);
 
-  let ok = 0;
-  let failed = 0;
-
+  let ok = 0, failed = 0;
   for (const uid of participants) {
     try {
       await fcaChangeNickname(api, "", ctx.thread.id, uid);
@@ -417,16 +501,15 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: P
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
-      pCtx.logger.info("Bot nickname restored after clear.", { threadID: ctx.thread.id, botNick });
     } catch { /* best effort */ }
   }
 
   const threadState = getThreadState(store, ctx.thread.id);
   threadState.nicknames        = {};
   threadState.protectNicknames = false;
-  saveStore(store);
+  saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-  pCtx.logger.info("All nicknames cleared (bot skipped).", { threadID: ctx.thread.id, ok, failed });
+  pCtx.logger.info("All nicknames cleared.", { threadID: ctx.thread.id, ok, failed });
 
   const lines = [HEADER, "", "✅ تم مسح جميع الكنيات", `⌯ نجح: ${ok} عضو`];
   if (failed > 0) lines.push(`⌯ فشل: ${failed} عضو`);
@@ -439,91 +522,100 @@ async function handleClearNicknames(ctx: Context, pCtx: IPluginContext, store: P
 class ManagementPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "management",
-    version:     "4.0.0",
-    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية مدمجة في pipeline الأحداث.",
+    version:     "5.0.0",
+    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية مدمجة. مدعوم بـ MongoDB.",
     author:      "Sixseven-6677",
   };
 
   private ctx!:  IPluginContext;
   private store: ProtectionStore = { threads: {}, botNicknames: {} };
+  private repo:  IGroupSettingsRepository | null = null;
 
   async onLoad(ctx: IPluginContext): Promise<void> {
-    this.ctx   = ctx;
-    this.store = loadStore();
+    this.ctx  = ctx;
+    this.repo = ctx.consumeService<IGroupSettingsRepository>("group-settings-repo") ?? null;
+
+    if (this.repo) {
+      // Load from MongoDB
+      try {
+        const docs = await this.repo.findAll();
+        for (const d of docs) {
+          this.store.threads[d.threadId] = {
+            protectName:      d.protectName,
+            lockedName:       d.lockedName,
+            protectNicknames: d.protectNicknames,
+            nicknames:        d.nicknames,
+          };
+          if (d.botNickname) {
+            this.store.botNicknames[d.threadId] = d.botNickname;
+          }
+        }
+        ctx.logger.info("ManagementPlugin loaded — ProtectionRegistry initialised from MongoDB.", {
+          savedThreads:  Object.keys(this.store.threads).length,
+          protectedBots: Object.keys(this.store.botNicknames).length,
+        });
+      } catch (err) {
+        ctx.logger.warn("ManagementPlugin: MongoDB load failed — falling back to file.", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.store = loadFromFile();
+      }
+    } else {
+      // No MongoDB — load from file
+      this.store = loadFromFile();
+      ctx.logger.info("ManagementPlugin loaded — ProtectionRegistry initialised from file.", {
+        savedThreads:  Object.keys(this.store.threads).length,
+        protectedBots: Object.keys(this.store.botNicknames).length,
+      });
+    }
+
     setProtectionStore(this.store);
-    ctx.logger.info("ManagementPlugin loaded — ProtectionRegistry initialised.", {
-      savedThreads:  Object.keys(this.store.threads).length,
-      protectedBots: Object.keys(this.store.botNicknames).length,
-    });
   }
 
   async onEnable(): Promise<void> {
     const pCtx  = this.ctx;
     const store = this.store;
+    const repo  = this.repo;
 
     const cmdName: ICommand = {
-      name:        "اسم",
-      aliases:     ["name", "groupname"],
-      description: "تغيير اسم القروب",
-      usage:       "اسم [الاسم الجديد]",
-      category:    "util",
-      adminOnly:   false,
-      hidden:      true,
+      name: "اسم", aliases: ["name", "groupname"],
+      description: "تغيير اسم القروب", usage: "اسم [الاسم الجديد]",
+      category: "util", adminOnly: false, hidden: true,
       async execute(ctx) { await handleGroupName(ctx, pCtx); },
     };
 
     const cmdBot: ICommand = {
-      name:        "بوت",
-      aliases:     ["botnick", "botname"],
-      description: "تغيير اسم البوت في القروب (للمالك فقط)",
-      usage:       "بوت [الاسم]",
-      category:    "util",
-      adminOnly:   false,
-      hidden:      true,
-      async execute(ctx) { await handleBotName(ctx, pCtx, store); },
+      name: "بوت", aliases: ["botnick", "botname"],
+      description: "تغيير اسم البوت في القروب (للمالك فقط)", usage: "بوت [الاسم]",
+      category: "util", adminOnly: false, hidden: true,
+      async execute(ctx) { await handleBotName(ctx, pCtx, store, repo); },
     };
 
     const cmdNick: ICommand = {
-      name:        "كنية",
-      aliases:     ["nick", "nickname"],
-      description: "تعيين كنية لجميع الأعضاء",
-      usage:       "كنية [الكنية]",
-      category:    "util",
-      adminOnly:   false,
-      hidden:      true,
-      async execute(ctx) { await handleSetNickname(ctx, pCtx, store); },
+      name: "كنية", aliases: ["nick", "nickname"],
+      description: "تعيين كنية لجميع الأعضاء", usage: "كنية [الكنية]",
+      category: "util", adminOnly: false, hidden: true,
+      async execute(ctx) { await handleSetNickname(ctx, pCtx, store, repo); },
     };
 
     const cmdProtect: ICommand = {
-      name:        "حماية",
-      aliases:     ["protect", "protection"],
-      description: "تفعيل/إيقاف حماية اسم القروب أو الكنيات",
-      usage:       "حماية [اسم|كنيات]",
-      category:    "util",
-      adminOnly:   false,
-      hidden:      true,
-      async execute(ctx) { await handleProtection(ctx, pCtx, store); },
+      name: "حماية", aliases: ["protect", "protection"],
+      description: "تفعيل/إيقاف حماية اسم القروب أو الكنيات", usage: "حماية [اسم|كنيات]",
+      category: "util", adminOnly: false, hidden: true,
+      async execute(ctx) { await handleProtection(ctx, pCtx, store, repo); },
     };
 
     const cmdClean: ICommand = {
-      name:        "تنظيف",
-      aliases:     ["clean", "clearnicks"],
-      description: "مسح جميع الكنيات من القروب",
-      usage:       "تنظيف كنيات",
-      category:    "util",
-      adminOnly:   false,
-      hidden:      true,
-      async execute(ctx) { await handleClearNicknames(ctx, pCtx, store); },
+      name: "تنظيف", aliases: ["clean", "clearnicks"],
+      description: "مسح جميع الكنيات من القروب", usage: "تنظيف كنيات",
+      category: "util", adminOnly: false, hidden: true,
+      async execute(ctx) { await handleClearNicknames(ctx, pCtx, store, repo); },
     };
 
     const cmdHelp: ICommand = {
-      name:        "ادارة",
-      aliases:     ["manage", "إدارة", "management"],
-      description: "عرض أوامر إدارة القروب",
-      usage:       "ادارة",
-      category:    "util",
-      adminOnly:   false,
-      hidden:      false,
+      name: "ادارة", aliases: ["manage", "إدارة", "management"],
+      description: "عرض أوامر إدارة القروب", usage: "ادارة",
+      category: "util", adminOnly: false, hidden: false,
       async execute(ctx) { await showHelp(ctx); },
     };
 
@@ -534,17 +626,18 @@ class ManagementPlugin implements IPlugin {
 
     pCtx.logger.info(
       "ManagementPlugin enabled — protection handled via FCA event pipeline " +
-      "(log:thread-name + log:user-nickname → GroupHandler)."
+      "(log:thread-name + log:user-nickname → GroupHandler). " +
+      `Storage: ${this.repo ? "MongoDB" : "file"}.`
     );
   }
 
   async onDisable(): Promise<void> {
-    saveStore(this.store);
-    this.ctx.logger.info("ManagementPlugin disabled — store saved.");
+    flushAllToFile(this.store);
+    this.ctx.logger.info("ManagementPlugin disabled — state flushed to file.");
   }
 
   async onUnload(): Promise<void> {
-    saveStore(this.store);
+    flushAllToFile(this.store);
     this.ctx.logger.info("ManagementPlugin unloaded.");
   }
 }

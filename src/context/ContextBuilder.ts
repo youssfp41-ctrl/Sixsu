@@ -27,9 +27,10 @@ const FALLBACK_USER = (id: string): ContextUser => ({
 });
 
 export class ContextBuilder {
-  private readonly sender: ISender;
-  private userService?: IUserService;
-  private ownerIds: Set<string> = new Set();
+  private readonly sender:  ISender;
+  private userService?:     IUserService;
+  private ownerIds:         Set<string> = new Set();
+  private adminStore?:      { has(id: string): boolean };
 
   constructor(sender: ISender, userService?: IUserService) {
     this.sender      = sender;
@@ -48,6 +49,18 @@ export class ContextBuilder {
   }
 
   /**
+   * Set the AdminStore reference.
+   * Users in this store always get at least role "admin" in every Context,
+   * regardless of what the DB returns — mirroring the owner override pattern.
+   * This is the critical fix: ctx.hasRole("admin") now reflects the live
+   * AdminStore, not just the potentially-stale MongoDB role.
+   */
+  setAdminStore(store: { has(id: string): boolean }): void {
+    this.adminStore = store;
+    log.debug("ContextBuilder: adminStore attached.");
+  }
+
+  /**
    * Builds a Context asynchronously.
    *
    * thread.id  = event.senderId  (threadID in FCA — correct reply routing)
@@ -62,11 +75,9 @@ export class ContextBuilder {
 
     const buildStart = Date.now();
 
-    // thread.id is always the routing destination (threadID for FCA)
     const thread:  ContextThread  = { id: event.senderId, pageId: event.pageId };
     const message: ContextMessage = this.buildMessage(event);
 
-    // Real user identity: senderFbId (group chats) or senderId (DMs/non-FCA)
     const userLookupId = event.senderFbId ?? event.senderId;
 
     log.debug("Building context.", {
@@ -124,6 +135,22 @@ export class ContextBuilder {
     if (this.ownerIds.has(userLookupId) && user.role !== "owner") {
       log.debug(`ContextBuilder: user ${userLookupId} is an owner — overriding role.`);
       user = { ...user, role: "owner" };
+    }
+
+    // ── Admin store override ──────────────────────────────────────────────
+    // If the user is in the live AdminStore and not already "owner",
+    // elevate the role to "admin". This is the single fix that makes
+    // ctx.hasRole("admin") work for all dynamically-added bot admins,
+    // even when MongoDB is unavailable or the cached DB role is stale.
+    if (
+      this.adminStore?.has(userLookupId) &&
+      user.role !== "owner" &&
+      user.role !== "admin"
+    ) {
+      log.debug(
+        `ContextBuilder: user ${userLookupId} is in AdminStore — elevating role to admin.`
+      );
+      user = { ...user, role: "admin" };
     }
 
     const totalMs = Date.now() - buildStart;
