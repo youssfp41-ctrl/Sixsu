@@ -132,9 +132,9 @@ export class ContextBuilder {
 
     // ── Owner override ────────────────────────────────────────────────────
     // If the user's ID is in ownerIds, force role to "owner" regardless of DB.
-    if (this.ownerIds.has(userLookupId) && user.role !== "owner") {
-      log.debug(`ContextBuilder: user ${userLookupId} is an owner — overriding role.`);
-      user = { ...user, role: "owner" };
+    if (this.ownerIds.has(userLookupId) && user.role !== "admin") {
+      log.debug(`ContextBuilder: user ${userLookupId} is in ownerIds — elevating role to admin.`);
+      user = { ...user, role: "admin" };
     }
 
     // ── Admin store override ──────────────────────────────────────────────
