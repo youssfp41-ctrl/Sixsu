@@ -86,25 +86,31 @@ function isValidMongoUri(uri: string): boolean {
 // ─── Per-account setup ────────────────────────────────────────────────────────
 
 interface AccountSetupOptions {
-  label:       string;
-  credentials: AuthCredentials;
-  userSvc:     UserService;
-  adminStore:  AdminStore;
-  bot:         Bot;
-  isPrimary:   boolean;
+  label:           string;
+  credentials:     AuthCredentials;
+  userSvc:         UserService;
+  adminStore:      AdminStore;
+  bot:             Bot;
+  isPrimary:       boolean;
+  /** Milliseconds to wait before the first login attempt (stagger). Default: 0.
+   *  Set ≥5000 for secondary accounts to prevent Facebook rate-limits / MQTT
+   *  interference when two accounts log in from the same IP in quick succession. */
+  startupDelayMs?: number;
 }
 
 function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
-  const { label, credentials, userSvc, adminStore, bot, isPrimary } = opts;
+  const { label, credentials, userSvc, adminStore, bot, isPrimary, startupDelayMs = 0 } = opts;
 
   const cookieClient = new CookieHttpClient(credentials.appState);
   const botUserId    = cookieClient.getUserId();
 
   const systemName   = isPrimary ? "mirai-transport" : `mirai-transport-${label}`;
-  const transport    = new MiraiTransport(credentials.appState, systemName);
+
+  // Pass startupDelayMs so secondary accounts stagger their login attempts.
+  const transport    = new MiraiTransport(credentials.appState, systemName, startupDelayMs);
   const sender: ISender = new MiraiSender(transport);
 
-  log.info(`Account [${label}]: transport created.`, { botUserId, systemName });
+  log.info(`Account [${label}]: transport created.`, { botUserId, systemName, startupDelayMs });
 
   if (isPrimary) {
     setGroupSender(sender);
@@ -113,17 +119,20 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
     setGroupApiGetter(() => transport.getApi() as any);
   }
 
-  const normalizer = new FacebookEventNormalizer();
+  const normalizer  = new FacebookEventNormalizer();
   const connection  = new FacebookConnection();
   const gateway     = new FacebookGateway(connection, sender, normalizer);
   connection.connect();
 
-  // Wire context builder — owner IDs, user service, and admin store
   gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
   gateway.getContextBuilder().setUserService(userSvc);
-  gateway.getContextBuilder().setAdminStore(adminStore);  // Critical fix
+  gateway.getContextBuilder().setAdminStore(adminStore);
 
   const adapter = new FcaEventAdapter(botUserId);
+
+  // Capture the account-specific sender in a closure so group events (member
+  // joined/left) are sent through the correct account, not always primary.
+  const accountSender = sender;
 
   transport.setEventHandler((fcaEvent) => {
     const entries = adapter.adapt(fcaEvent);
@@ -139,8 +148,10 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
         },
         handleMessage,
         {
-          onMemberJoined:    handleMemberJoined,
-          onMemberLeft:      handleMemberLeft,
+          // Pass per-account sender so secondary account's group events
+          // are delivered via the secondary account, not via primary.
+          onMemberJoined:    (evt) => handleMemberJoined(evt, accountSender),
+          onMemberLeft:      (evt) => handleMemberLeft(evt, accountSender),
           onNameChanged:     handleNameChanged,
           onNicknameChanged: handleNicknameChanged,
         },
@@ -167,7 +178,8 @@ async function bootstrap(): Promise<void> {
   app.get(["/health", "/api/health", "/api/healthz"], (_req, res) => {
     const accounts = transports.map(({ label, transport: t }) => ({
       account:   label,
-      connected: t.getApi() !== null,
+      connected: t.isConnected(),
+      running:   t.isRunning(),
       userId:    t.getCurrentUserId() || null,
     }));
     res.status(200).json({ status: "ok", uptime: process.uptime(), accounts });
@@ -305,6 +317,7 @@ async function bootstrap(): Promise<void> {
     const t = bootFcaAccount({
       label: "primary", credentials: primaryCreds,
       userSvc, adminStore, bot, isPrimary: true,
+      startupDelayMs: 0,  // Primary logs in immediately
     });
     transports.push({ label: "primary", transport: t });
   }
@@ -313,9 +326,39 @@ async function bootstrap(): Promise<void> {
     const t = bootFcaAccount({
       label: "secondary", credentials: secondaryCreds,
       userSvc, adminStore, bot, isPrimary: false,
+      // 5-second stagger: prevents Facebook rate-limits and transient MQTT
+      // interference (error 1357031) that occurs when two accounts log in
+      // from the same IP address in rapid succession.
+      startupDelayMs: 5_000,
     });
     transports.push({ label: "secondary", transport: t });
     log.info("✅ Two accounts active — bot running on primary + secondary Facebook accounts.");
+  }
+
+  // Wire ReconnectManager to actually monitor MQTT connectivity (not just credentials)
+  // and to restart the transport when credentials are refreshed.
+  // Must be done after transports are created so the map is populated.
+  if (transports.length > 0) {
+    const transportMap = new Map<string, MiraiTransport>(
+      transports.map(({ label, transport }) => [label, transport])
+    );
+
+    // Health check: report unhealthy when MQTT is disconnected (not just when
+    // credentials are missing — the old check never triggered because credentials
+    // stay loaded in AuthManager throughout the process lifetime).
+    reconnect.setHealthCheck(async (accountId: string) => {
+      return transportMap.get(accountId)?.isConnected() ?? false;
+    });
+
+    // Restart hook: after ReconnectManager refreshes credentials, also restart the
+    // MQTT transport. Without this, auth refreshes silently but the bot stays offline.
+    reconnect.setRestartHook(async (accountId: string) => {
+      const t = transportMap.get(accountId);
+      if (t) {
+        log.info(`ReconnectManager → transport restart for account [${accountId}].`);
+        await t.restart();
+      }
+    });
   }
 
   if (!primaryCreds && !secondaryCreds) {
@@ -377,12 +420,12 @@ async function bootstrap(): Promise<void> {
     );
     gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
     gateway.getContextBuilder().setUserService(userSvc);
-    gateway.getContextBuilder().setAdminStore(adminStore);  // Critical fix
+    gateway.getContextBuilder().setAdminStore(adminStore);
     conn.connect();
 
     app.use("/webhook", createWebhookRouter(gateway, {
-      onMemberJoined: handleMemberJoined,
-      onMemberLeft:   handleMemberLeft,
+      onMemberJoined: (evt) => handleMemberJoined(evt),
+      onMemberLeft:   (evt) => handleMemberLeft(evt),
     }));
   }
 
@@ -399,19 +442,16 @@ async function bootstrap(): Promise<void> {
       const groupSettingsRepo  = new GroupSettingsRepository();
       const banRepo            = new BanRepository();
 
-      // Wire stores → MongoDB
       adminStore.setRepository(botAdminRepo);
       lockdownStore.setRepository(groupSettingsRepo);
       banStore.setRepository(banRepo);
 
-      // Load persisted data from MongoDB into in-memory stores
       await Promise.all([
         adminStore.loadFromDatabase(),
         lockdownStore.loadFromDatabase(),
         banStore.loadFromDatabase(),
       ]);
 
-      // Expose repositories for plugins (management plugin needs group-settings-repo)
       svcReg.provide("group-settings-repo", groupSettingsRepo, "core");
       svcReg.provide("ban-repo",            banRepo,           "core");
       svcReg.provide("botadmin-repo",       botAdminRepo,      "core");
@@ -427,7 +467,11 @@ async function bootstrap(): Promise<void> {
   }
 
   log.info("── BOT READY ────────────────────────────────────────────────", {
-    accounts:    transports.map(({ label, transport: t }) => ({ label, userId: t.getCurrentUserId() })),
+    accounts:    transports.map(({ label, transport: t }) => ({
+      label,
+      userId:    t.getCurrentUserId(),
+      connected: t.isConnected(),
+    })),
     prefix:      config.bot.prefix,
     nodeEnv:     config.nodeEnv,
     mongoDb:     mongoEnabled ? "connected" : "disabled — set MONGODB_URI for persistence",
