@@ -1,3 +1,17 @@
+// Polyfill: MongoDB driver requires globalThis.crypto (Node 18+).
+// This ensures compatibility on all Railway Node versions.
+if (typeof globalThis.crypto === "undefined") {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeCrypto = require("crypto");
+  if (nodeCrypto.webcrypto) {
+    Object.defineProperty(globalThis, "crypto", {
+      value: nodeCrypto.webcrypto,
+      configurable: true,
+      writable: true,
+    });
+  }
+}
+
 import path    from "path";
 import express from "express";
 import { config } from "./config/env";
