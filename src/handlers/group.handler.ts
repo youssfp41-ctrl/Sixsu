@@ -26,7 +26,7 @@ interface IFcaProtectionApi {
   ): void;
 }
 
-// ── Singleton references ───────────────────────────────────────────────────
+// ── Singleton references (primary account defaults) ────────────────────────
 
 let _sender:    ISender | undefined;
 let _botUserId: string  = "";
@@ -38,9 +38,11 @@ export function setGroupApiGetter(g: () => IFcaProtectionApi | null): void { _ap
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function getSender(): ISender {
-  if (!_sender) throw new Error("GroupHandler: sender not wired.");
-  return _sender;
+/** Returns the account-specific sender if provided, otherwise the global primary sender. */
+function resolveSender(senderOverride?: ISender): ISender {
+  const s = senderOverride ?? _sender;
+  if (!s) throw new Error("GroupHandler: sender not wired.");
+  return s;
 }
 
 function getFcaApi(): IFcaProtectionApi | null {
@@ -113,7 +115,16 @@ async function notifyAdminBotAdded(
 
 // ── Public handlers ────────────────────────────────────────────────────────
 
-export async function handleMemberJoined(event: FBMemberJoinedEvent): Promise<void> {
+/**
+ * @param event           Member-joined event from any account's MQTT stream.
+ * @param senderOverride  Account-specific sender. When omitted, falls back to the global
+ *                        primary sender. Always pass the per-account sender from
+ *                        bootFcaAccount() so the reply is sent through the correct account.
+ */
+export async function handleMemberJoined(
+  event:          FBMemberJoinedEvent,
+  senderOverride?: ISender,
+): Promise<void> {
   if (event.members.length === 0) {
     log.debug("member_joined event with empty members list — skipping.", {
       senderId: event.senderId,
@@ -127,7 +138,7 @@ export async function handleMemberJoined(event: FBMemberJoinedEvent): Promise<vo
     members:       event.members,
   });
 
-  const sender = getSender();
+  const sender = resolveSender(senderOverride);
 
   const botWasAdded = !!_botUserId && event.members.includes(_botUserId);
 
@@ -150,7 +161,16 @@ export async function handleMemberJoined(event: FBMemberJoinedEvent): Promise<vo
   await sender.sendText(event.senderId, text);
 }
 
-export async function handleMemberLeft(event: FBMemberLeftEvent): Promise<void> {
+/**
+ * @param event           Member-left event from any account's MQTT stream.
+ * @param senderOverride  Account-specific sender. When omitted, falls back to the global
+ *                        primary sender. Always pass the per-account sender from
+ *                        bootFcaAccount() so the reply is sent through the correct account.
+ */
+export async function handleMemberLeft(
+  event:          FBMemberLeftEvent,
+  senderOverride?: ISender,
+): Promise<void> {
   if (event.members.length === 0) {
     log.debug("member_left event with empty members list — skipping.", {
       senderId: event.senderId,
@@ -163,7 +183,7 @@ export async function handleMemberLeft(event: FBMemberLeftEvent): Promise<void> 
     members:  event.members,
   });
 
-  const sender        = getSender();
+  const sender        = resolveSender(senderOverride);
   const removedBySelf = event.members.length === 1 && event.members[0] === event.senderId;
   const text          = buildLeaveMessage(event.members, removedBySelf);
 
