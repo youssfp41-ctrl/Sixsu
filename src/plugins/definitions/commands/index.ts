@@ -1,36 +1,9 @@
-import { config }              from "../../../config/env";
-import { IPlugin, PluginManifest } from "../../types/IPlugin";
-import { IPluginContext }          from "../../types/IPluginContext";
-import { ICommand }               from "../../../commands/types/ICommand";
-import { Context }                from "../../../context/Context";
-
-// ─── Header ──────────────────────────────────────────────────────────────────
-
-const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐂𝐎𝐌𝐌𝐀𝐍𝐃𝐒🪽↴";
-
-// ─── Static curated command list ─────────────────────────────────────────────
-
-function buildCommandList(prefix: string, isAdmin: boolean): string {
-  const lines = [
-    HEADER,
-    "",
-    `⌯ البادئة: ${prefix}`,
-    "",
-    `⌯ ${prefix}اوامر`,
-    `⌯ ${prefix}ابتيم`,
-    `⌯ ${prefix}ادمن`,
-    `⌯ ${prefix}اغلاق`,
-    `⌯ ${prefix}بلاك`,
-    `⌯ ${prefix}قروبات`,
-    `⌯ ${prefix}ادارة`,
-  ];
-
-  if (isAdmin) {
-    lines.push(`⌯ ${prefix}مالك`);
-  }
-
-  return lines.join("\n");
-}
+import { config }                    from "../../../config/env";
+import { IPlugin, PluginManifest }  from "../../types/IPlugin";
+import { IPluginContext }            from "../../types/IPluginContext";
+import { ICommand }                 from "../../../commands/types/ICommand";
+import { Context }                  from "../../../context/Context";
+import { buildCommandsMessage }     from "../../../ui/BotUI";
 
 // ─── Command ─────────────────────────────────────────────────────────────────
 
@@ -49,14 +22,14 @@ function makeCommand(_pCtx: IPluginContext): ICommand {
 
       const prefix  = config.bot.prefix || "/";
       const isAdmin = ctx.hasRole("admin");
-      const message = buildCommandList(prefix, isAdmin);
+      const message = buildCommandsMessage(prefix, isAdmin);
 
       await ctx.reply(message);
     },
   };
 }
 
-// ─── Plugin ──────────────────────────────────────────────────────────────────
+// ─── Plugin ───────────────────────────────────────────────────────────────────
 
 class CommandsPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
