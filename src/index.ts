@@ -44,6 +44,7 @@ import { CommandRegistry }                   from "./commands/CommandRegistry";
 import { CommandLoader }                     from "./commands/CommandLoader";
 import { CommandPipeline }                   from "./commands/CommandPipeline";
 import { typingMiddleware }                  from "./commands/middleware/typing.middleware";
+import { groupMuteMiddleware }                from "./commands/middleware/groupmute.middleware";
 import { MiddlewareManager }                 from "./middleware/MiddlewareManager";
 import { createLoggingMiddleware }           from "./middleware/built-in/logging.middleware";
 import { createCooldownMiddleware }          from "./middleware/built-in/cooldown.middleware";
@@ -309,6 +310,7 @@ async function bootstrap(): Promise<void> {
     .use(mwManager.fn("banned"))
     .use(mwManager.fn("logging"))
     .use(mwManager.fn("lockdown"))
+    .use(groupMuteMiddleware)           // block commands from muted groups
     .use(mwManager.fn("antispam"))
     .use(mwManager.fn("cooldown"))
     .use(mwManager.fn("permissions"))
