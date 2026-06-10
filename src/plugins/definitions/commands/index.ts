@@ -1,9 +1,13 @@
-import { config }                    from "../../../config/env";
-import { IPlugin, PluginManifest }  from "../../types/IPlugin";
-import { IPluginContext }            from "../../types/IPluginContext";
-import { ICommand }                 from "../../../commands/types/ICommand";
-import { Context }                  from "../../../context/Context";
-import { buildCommandsMessage }     from "../../../ui/BotUI";
+import { config }                                      from "../../../config/env";
+import { IPlugin, PluginManifest }                    from "../../types/IPlugin";
+import { IPluginContext }                              from "../../types/IPluginContext";
+import { ICommand }                                   from "../../../commands/types/ICommand";
+import { Context }                                    from "../../../context/Context";
+import {
+  buildCommandsMessage,
+  buildCategoryMessage,
+  resolveCategory,
+} from "../../../ui/BotUI";
 
 // ─── Command ─────────────────────────────────────────────────────────────────
 
@@ -11,8 +15,8 @@ function makeCommand(_pCtx: IPluginContext): ICommand {
   return {
     name:        "اوامر",
     aliases:     ["commands", "cmds", "أوامر", "help", "مساعدة"],
-    description: "عرض قائمة أوامر البوت",
-    usage:       "اوامر",
+    description: "عرض قائمة أوامر البوت — أو تصفيتها: اوامر [نظام|خاصة|ادارة]",
+    usage:       "اوامر | اوامر [نظام|خاصة|ادارة]",
     category:    "util",
     adminOnly:   false,
     hidden:      false,
@@ -21,10 +25,25 @@ function makeCommand(_pCtx: IPluginContext): ICommand {
       await ctx.typingOn();
 
       const prefix  = config.bot.prefix || "/";
-      const isAdmin = ctx.hasRole("admin");
-      const message = buildCommandsMessage(prefix, isAdmin);
+      const filter  = ctx.args[0]?.trim();
 
-      await ctx.reply(message);
+      // ── Category filter ─────────────────────────────────────────────────
+      if (filter) {
+        const cat = resolveCategory(filter);
+        if (cat) {
+          await ctx.reply(buildCategoryMessage(cat, prefix));
+          return;
+        }
+        // Unknown filter — fall through to full menu with a hint
+        await ctx.reply(
+          buildCommandsMessage(prefix, ctx.hasRole("admin")) +
+          `\n\n⚠️ القسم "${filter}" غير موجود. الأقسام: نظام · خاصة · ادارة`
+        );
+        return;
+      }
+
+      // ── Full menu ───────────────────────────────────────────────────────
+      await ctx.reply(buildCommandsMessage(prefix, ctx.hasRole("admin")));
     },
   };
 }
@@ -34,8 +53,8 @@ function makeCommand(_pCtx: IPluginContext): ICommand {
 class CommandsPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "commands",
-    version:     "2.0.0",
-    description: "عرض قائمة أوامر البوت المتاحة.",
+    version:     "2.1.0",
+    description: "عرض قائمة أوامر البوت مع دعم تصفية الأقسام.",
     author:      "Sixseven-6677",
   };
 
