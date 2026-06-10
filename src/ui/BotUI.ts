@@ -2,7 +2,7 @@
 // Single source of truth for all bot message styling.
 // All plugins import from here — never build raw message strings manually.
 
-export const BRAND = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
+export const BRAND = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚬̶݄݈݊𝐓݂ ❈ 🦢";
 export const DIV   = "━━━━━━━━━━━━";
 
 // ─── Bold unicode digits ──────────────────────────────────────────────────────
@@ -19,41 +19,96 @@ function toBold(n: number): string {
     .join("");
 }
 
-// ─── Command group definitions ────────────────────────────────────────────────
+// ─── Category definitions ─────────────────────────────────────────────────────
 
-interface CmdGroup {
-  label: string;
-  emoji: string;
-  count: number;
+interface CmdEntry {
+  name: string;
+  desc: string;
 }
 
-const BASE_GROUPS: CmdGroup[] = [
-  { label: "اوامر النظام",   emoji: "🪅", count: 3 },
-  { label: "اوامر خاصة",    emoji: "🌨", count: 1 },
-  { label: "اوامر الادارة", emoji: "🏴", count: 3 },
+interface CategoryDef {
+  key:    string;
+  label:  string;
+  emoji:  string;
+  cmds:   CmdEntry[];
+  /** Arabic trigger words that map to this category */
+  triggers: string[];
+}
+
+export const CATEGORIES: CategoryDef[] = [
+  {
+    key:      "system",
+    label:    "اوامر النظام",
+    emoji:    "🪅",
+    triggers: ["نظام", "system", "sys"],
+    cmds: [
+      { name: "اوامر",  desc: "عرض قائمة الأوامر" },
+      { name: "ابتيم",  desc: "معلومات النظام والتشغيل" },
+      { name: "بادئة",  desc: "البادئة الحالية للأوامر" },
+    ],
+  },
+  {
+    key:      "special",
+    label:    "اوامر خاصة",
+    emoji:    "🌨",
+    triggers: ["خاصة", "خاص", "special"],
+    cmds: [
+      { name: "بلاك",  desc: "إرسال رسالة تلقائية متكررة داخل القروب" },
+    ],
+  },
+  {
+    key:      "admin",
+    label:    "اوامر الادارة",
+    emoji:    "🏴",
+    triggers: ["ادارة", "الادارة", "إدارة", "الإدارة", "admin", "adm"],
+    cmds: [
+      { name: "ادمن",   desc: "عرض وإدارة أدمن القروب" },
+      { name: "اغلاق",  desc: "تفعيل أو إيقاف وضع الإغلاق" },
+      { name: "قروبات", desc: "عرض وإدارة القروبات المتاحة" },
+    ],
+  },
 ];
 
-// ─── Commands list message ────────────────────────────────────────────────────
+/** Resolve an Arabic/English keyword to a CategoryDef, or null if not found. */
+export function resolveCategory(keyword: string): CategoryDef | null {
+  const k = keyword.trim().toLowerCase();
+  return CATEGORIES.find((c) => c.triggers.some((t) => t.toLowerCase() === k)) ?? null;
+}
+
+// ─── Full commands list ───────────────────────────────────────────────────────
 
 export function buildCommandsMessage(prefix: string, isAdmin: boolean): string {
-  const groups: CmdGroup[] = BASE_GROUPS.map((g) => ({ ...g }));
-  if (isAdmin && groups[2]) groups[2].count += 1;
+  const adminCat = CATEGORIES.find((c) => c.key === "admin")!;
+  const adminCount = isAdmin ? adminCat.cmds.length + 1 : adminCat.cmds.length;
 
-  const [sys, spc, adm] = groups as [CmdGroup, CmdGroup, CmdGroup];
-
-  const groupLines = [
-    `${sys.label} ${toBold(sys.count)} . ̶ׁ${sys.emoji} ▾ `,
-    `${spc.label} ${toBold(spc.count)} . ̶ׁ${spc.emoji} ▾`,
-    `${adm.label} ${toBold(adm.count)} . ̶ׁ${adm.emoji} ▾ `,
-  ];
+  const groupLines = CATEGORIES.map((cat) => {
+    const count = cat.key === "admin" ? adminCount : cat.cmds.length;
+    return `${cat.label} ${toBold(count)} . ̶ׁ${cat.emoji} ▾`;
+  });
 
   return [
     BRAND,
     `⌗ ⨯ أمر البادئة الحالي هو  ' ${prefix} ' ${DIV}`,
     ...groupLines,
     `${DIV} `,
-    `🪭 . ៹࣪- لعرض التفاصيل  :[اوامر"اسم الامر"]`,
+    `🪭 . ៹࣪- لعرض التفاصيل  :[اوامر"اسم القسم"]`,
     BRAND,
+  ].join("\n");
+}
+
+// ─── Single category detail ───────────────────────────────────────────────────
+
+export function buildCategoryMessage(cat: CategoryDef, prefix: string): string {
+  const cmdLines = cat.cmds.map(
+    (c) => `. ̶ׁ${cat.emoji} ${prefix}${c.name} — ${c.desc}`
+  );
+
+  return [
+    BRAND,
+    `⌗ ⨯ ${cat.emoji} ${cat.label} ${DIV}`,
+    ...cmdLines,
+    `${DIV} `,
+    `🪭 . ៹࣪- للقائمة الكاملة: ${prefix}اوامر`,
   ].join("\n");
 }
 
@@ -95,4 +150,11 @@ export function buildUptimeMessage(data: UptimeData): string {
     `⛓️النظام: ${data.osType} ${data.arch} `,
     `⌛الاستجابة: ${data.latencyMs}ms ${DIV}`,
   ].join("\n");
+}
+
+// ─── Generic reply header (for non-commands plugins) ─────────────────────────
+// Replaces the old per-plugin HEADER constants.
+
+export function pluginHeader(section: string): string {
+  return `${BRAND}\n⌗ ⨯ ${section} ${DIV}`;
 }
