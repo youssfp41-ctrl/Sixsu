@@ -110,7 +110,7 @@ class GroupCache {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐂𝐎𝐍𝐓𝐑𝐎𝐋🪽↴";
+const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
 
 function getApi(pCtx: IPluginContext): IFcaControl | null {
   return (
