@@ -158,7 +158,7 @@ export function createLockdownMiddleware(opts: LockdownMiddlewareOptions): IMidd
         userId:   ctx.user.id,
         cmd:      (ctx.message.text ?? "").slice(0, 60),
       });
-      // Silent drop — chain stops here
+      await ctx.reply("🔒 وضع الإغلاق مفعّل في هذا القروب. الأوامر متاحة للأدمن فقط.");
     },
   };
 }
