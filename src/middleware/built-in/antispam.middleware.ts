@@ -10,7 +10,7 @@ export interface AntiSpamOptions {
   windowMs: number;
   /** Reply message when blocked. */
   message?: string;
-  /** Silence the reply (just stop the chain). Default: false. */
+  /** Silence the reply (just stop the chain, no user message). Default: false. */
   silent?: boolean;
 }
 
