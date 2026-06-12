@@ -120,13 +120,15 @@ function getApi(pCtx: IPluginContext): IFcaControl | null {
   );
 }
 
-async function ensureFresh(cache: GroupCache, api: IFcaControl, pCtx: IPluginContext): Promise<void> {
-  if (!cache.stale) return;
+async function ensureFresh(cache: GroupCache, api: IFcaControl, pCtx: IPluginContext): Promise<boolean> {
+  if (!cache.stale) return true;
   try {
     await cache.refresh(api);
     pCtx.logger.info("ControlPlugin: cache refreshed.", { count: cache.groups.length });
+    return true;
   } catch (err) {
     pCtx.logger.warn("ControlPlugin: cache refresh failed.", { error: String(err) });
+    return false;
   }
 }
 
@@ -153,8 +155,8 @@ async function handleList(ctx: Context, pCtx: IPluginContext, cache: GroupCache)
   const api = getApi(pCtx);
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
-  await ensureFresh(cache, api, pCtx);
-  const groups = cache.groups;
+  const refreshed = await ensureFresh(cache, api, pCtx);
+  const groups    = cache.groups;
 
   if (groups.length === 0) {
     await ctx.reply(`${HEADER}\n\n⌯ البوت ليس في أي قروب حالياً.`);
@@ -168,12 +170,14 @@ async function handleList(ctx: Context, pCtx: IPluginContext, cache: GroupCache)
     return `  ${i + 1}. ${g.name} (${g.membersCount} عضو)${muted}${active}`;
   });
 
-  const more = groups.length > 25 ? `\n⌯ +${groups.length - 25} قروب إضافي` : "";
+  const more      = groups.length > 25 ? `\n⌯ +${groups.length - 25} قروب إضافي` : "";
+  const staleNote = !refreshed ? "⚠️ البيانات قد تكون غير محدّثة (تعذّر التحديث من Facebook)." : "";
 
   await ctx.reply([
     HEADER, "",
     `⌯ إجمالي القروبات: ${groups.length}`,
     `⌯ آخر تحديث: قبل ${cache.ageSeconds} ثانية`,
+    staleNote,
     "",
     ...lines, more, "",
     "⌯ للإدارة: قروب [حالة|رسالة|مغادرة|اسم|كتم|فتح] [رقم]",
