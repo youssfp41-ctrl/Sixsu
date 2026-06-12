@@ -1,6 +1,6 @@
-import path                      from "path";
-import os                        from "os";
-import fs                        from "fs";
+import path                       from "path";
+import os                         from "os";
+import fs                         from "fs";
 import type { Readable }          from "stream";
 import { IPlugin, PluginManifest } from "../../types/IPlugin";
 import { IPluginContext }          from "../../types/IPluginContext";
@@ -17,8 +17,8 @@ interface FcaSendWithAttachment {
 interface IFcaMusicApi {
   getCurrentUserID(): string;
   sendMessage(
-    msg:      string | FcaSendWithAttachment,
-    threadID: string,
+    msg:       string | FcaSendWithAttachment,
+    threadID:  string,
     callback?: (err: Error | null, info: unknown) => void,
   ): void;
   unsendMessage(
@@ -37,10 +37,10 @@ interface YtSearchItem {
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-const HEADER      = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
-const COOLDOWN_MS = 15_000;
-const cooldowns   = new Map<string, number>();
-
+const HEADER       = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
+const COOLDOWN_MS  = 15_000;
+const TIMEOUT_MS   = 120_000; // 2 min max download
+const cooldowns    = new Map<string, number>();
 const YT_URL_REGEX = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -66,8 +66,18 @@ function sendRaw(
   });
 }
 
-function tryUnsend(api: IFcaMusicApi, messageID: string): void {
+function tryUnsend(api: IFcaMusicApi, messageID: string | undefined | null): void {
+  if (!messageID) return;
   try { api.unsendMessage(messageID); } catch { /* best-effort */ }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`⏱ انتهت مهلة ${label} (${ms / 1000} ثانية)`)), ms)
+    ),
+  ]);
 }
 
 // ─── Plugin ────────────────────────────────────────────────────────────────
@@ -75,7 +85,7 @@ function tryUnsend(api: IFcaMusicApi, messageID: string): void {
 class MusicPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "music",
-    version:     "1.0.0",
+    version:     "1.1.0",
     description: "تحميل وإرسال الأغاني من يوتيوب.",
     author:      "Sixseven-6677",
   };
@@ -102,12 +112,12 @@ class MusicPlugin implements IPlugin {
       async execute(ctx: Context): Promise<void> {
         await ctx.typingOn();
 
-        // ── Cooldown ────────────────────────────────────────────────────
+        // ── Cooldown check ───────────────────────────────────────────────
         const cdKey   = `${ctx.user.id}:${ctx.thread.id}`;
         const lastRun = cooldowns.get(cdKey) ?? 0;
         const wait    = COOLDOWN_MS - (Date.now() - lastRun);
         if (wait > 0) {
-          await ctx.reply(`⏳ انتظر ${Math.ceil(wait / 1000)} ثانية قبل الاستخدام مجدداً.`);
+          await ctx.reply(`⏳ انتظر ${Math.ceil(wait / 1000)} ثانية.`);
           return;
         }
 
@@ -121,7 +131,7 @@ class MusicPlugin implements IPlugin {
         if (!query) {
           await ctx.reply(
             `${HEADER}\n\n` +
-            "⚠️ اكتب اسم الاغنية أو رابط يوتيوب.\n\n" +
+            "⚠️ اكتب اسم الأغنية أو رابط يوتيوب.\n\n" +
             "📌 أمثلة:\n" +
             "  اغاني صوت الحرية\n" +
             "  اغاني https://youtu.be/dQw4w9WgXcQ"
@@ -132,17 +142,25 @@ class MusicPlugin implements IPlugin {
         cooldowns.set(cdKey, Date.now());
 
         const threadID = ctx.thread.id;
-        let waitInfo: { messageID: string } | null = null;
+
+        // Helper: update status message (unsend old, send new)
+        let statusMsgId: string | null = null;
+        const setStatus = async (text: string): Promise<void> => {
+          tryUnsend(api, statusMsgId);
+          statusMsgId = null;
+          try {
+            const info = await sendRaw(api, threadID, text);
+            statusMsgId = info.messageID;
+          } catch { /* ignore */ }
+        };
+
+        await setStatus(`🔍 جاري البحث عن: "${query}"...`);
 
         try {
-          waitInfo = await sendRaw(api, threadID, `🔍 جاري البحث عن: "${query}"...`);
-        } catch { /* ignore */ }
-
-        try {
-          // ── Resolve video ID and title ─────────────────────────────────
+          // ── Step 1: Search YouTube ─────────────────────────────────────
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const ytSearch = require("youtube-search-api") as {
-            GetListByKeyword(q: string, playlist: boolean, limit: number): Promise<{ items: YtSearchItem[] }>;
+            GetListByKeyword(q: string, pl: boolean, limit: number): Promise<{ items: YtSearchItem[] }>;
             GetVideoDetails(id: string): Promise<{ title?: string }>;
           };
 
@@ -153,16 +171,17 @@ class MusicPlugin implements IPlugin {
           if (urlMatch) {
             videoId = urlMatch[1];
             try {
-              const details = await ytSearch.GetVideoDetails(videoId);
-              title = details.title ?? query;
-            } catch {
-              title = query;
-            }
+              const d = await withTimeout(ytSearch.GetVideoDetails(videoId), 15_000, "جلب التفاصيل");
+              title = d.title ?? query;
+            } catch { title = query; }
           } else {
-            const results = await ytSearch.GetListByKeyword(query, false, 5);
-            const videos  = (results.items ?? []).filter((v) => v.type === "video");
+            const results = await withTimeout(
+              ytSearch.GetListByKeyword(query, false, 5),
+              15_000, "البحث"
+            );
+            const videos = (results.items ?? []).filter((v) => v.type === "video");
             if (!videos.length) {
-              if (waitInfo) tryUnsend(api, waitInfo.messageID);
+              tryUnsend(api, statusMsgId);
               await ctx.reply(`❌ لم أجد نتائج لـ "${query}"`);
               return;
             }
@@ -171,66 +190,94 @@ class MusicPlugin implements IPlugin {
           }
 
           const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-          if (waitInfo) tryUnsend(api, waitInfo.messageID);
-          waitInfo = null;
 
-          let loadInfo: { messageID: string } | null = null;
-          try {
-            loadInfo = await sendRaw(api, threadID, `🎵 وجدت: ${title}\n🔄 جاري التحميل...`);
-          } catch { /* ignore */ }
+          // ── Step 2: Download ───────────────────────────────────────────
+          await setStatus(`🎵 وجدت: ${title}\n🔄 جاري التحميل...`);
 
-          // ── Download audio via ytdl ────────────────────────────────────
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const ytdl = require("@distube/ytdl-core") as {
             (url: string, opts: Record<string, unknown>): Readable;
+            getInfo(url: string): Promise<{
+              formats: Array<{ itag: number; url: string; audioCodec?: string; hasAudio: boolean }>;
+            }>;
           };
 
           // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const ffmpegStatic: string = require("@ffmpeg-installer/ffmpeg").path;
+          const ffmpegPath: string = require("@ffmpeg-installer/ffmpeg").path;
 
           const tmpMp3 = path.join(os.tmpdir(), `sixsu_${Date.now()}.mp3`);
 
-          const audioStream = ytdl(videoUrl, {
-            quality:       "highestaudio",
-            filter:        "audioonly",
-            highWaterMark: 1 << 25,
-          });
+          // Download + convert with timeout
+          await withTimeout(
+            new Promise<void>((resolve, reject) => {
+              const audioStream = ytdl(videoUrl, {
+                quality:       "highestaudio",
+                filter:        "audioonly",
+                highWaterMark: 1 << 25,
+              });
 
-          await new Promise<void>((resolve, reject) => {
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const ffmpeg = require("fluent-ffmpeg");
-            ffmpeg(audioStream)
-              .setFfmpegPath(ffmpegStatic)
-              .toFormat("mp3")
-              .on("end", () => resolve())
-              .on("error", (err: Error) => reject(err))
-              .save(tmpMp3);
-          });
+              audioStream.on("error", (err: Error) => reject(new Error(`ytdl: ${err.message}`)));
 
-          if (loadInfo) tryUnsend(api, loadInfo.messageID);
+              // eslint-disable-next-line @typescript-eslint/no-var-requires
+              const ffmpeg = require("fluent-ffmpeg");
+              ffmpeg(audioStream)
+                .setFfmpegPath(ffmpegPath)
+                .toFormat("mp3")
+                .audioBitrate(128)
+                .on("end", () => resolve())
+                .on("error", (err: Error) => reject(new Error(`ffmpeg: ${err.message}`)))
+                .save(tmpMp3);
+            }),
+            TIMEOUT_MS,
+            "التحميل والتحويل"
+          );
+
+          // ── Step 3: Send audio ─────────────────────────────────────────
+          await setStatus(`📤 جاري الإرسال...`);
+
+          if (!fs.existsSync(tmpMp3)) {
+            throw new Error("ملف الصوت لم يُنشأ — تحقق من ffmpeg");
+          }
+
+          const fileSize = fs.statSync(tmpMp3).size;
+          pCtx.logger.info("MusicPlugin: sending audio.", { title, videoId, fileSize, threadId: threadID });
+
+          tryUnsend(api, statusMsgId);
+          statusMsgId = null;
 
           await sendRaw(api, threadID, {
             body:       `${HEADER}\n\n🎵 ${title}`,
             attachment: fs.createReadStream(tmpMp3),
           });
 
-          pCtx.logger.info("MusicPlugin: audio sent.", { title, videoId, threadId: threadID });
-
           try { fs.unlinkSync(tmpMp3); } catch { /* ignore */ }
+          pCtx.logger.info("MusicPlugin: done.", { title, threadId: threadID });
 
         } catch (err) {
-          if (waitInfo) tryUnsend(api, waitInfo.messageID);
-          pCtx.logger.warn("MusicPlugin: download failed.", { error: String(err) });
+          // Clean up status message
+          tryUnsend(api, statusMsgId);
+          statusMsgId = null;
+
+          const msg = err instanceof Error ? err.message : String(err);
+          pCtx.logger.warn("MusicPlugin: failed.", { error: msg, threadId: threadID });
+
           await ctx.reply(
-            `❌ تعذّر تحميل الأغنية.\n` +
-            `${err instanceof Error ? err.message : String(err)}`
+            `${HEADER}\n\n` +
+            `❌ تعذّر تحميل الأغنية:\n${msg}\n\n` +
+            `💡 تأكد أن البوت يملك الـ dependencies (npm install)`
           );
+
+          // Cleanup temp file if exists
+          try {
+            const tmpMp3 = path.join(os.tmpdir(), `sixsu_${Date.now()}.mp3`);
+            if (fs.existsSync(tmpMp3)) fs.unlinkSync(tmpMp3);
+          } catch { /* ignore */ }
         }
       },
     };
 
     pCtx.registerCommand(cmd);
-    pCtx.logger.info(`MusicPlugin enabled. Command "اغاني" registered.`);
+    pCtx.logger.info(`MusicPlugin v1.1 enabled. Command "اغاني" registered.`);
   }
 
   async onDisable(): Promise<void> { this.ctx.logger.info("MusicPlugin disabled."); }
