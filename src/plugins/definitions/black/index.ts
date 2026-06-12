@@ -282,7 +282,7 @@ class BlackPlugin implements IPlugin {
       aliases:     ["black", "blk"],
       description: "إرسال رسالة تلقائية متكررة داخل القروب",
       usage:       "بلاك [تشغيل|ايقاف|رسالة <نص>|وقت <ثواني>|حالة]",
-      category:    "automation",
+      category:    "private",
       adminOnly:   true,
       hidden:      false,
 
