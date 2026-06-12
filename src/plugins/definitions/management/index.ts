@@ -739,7 +739,7 @@ class ManagementPlugin implements IPlugin {
     const cmdHelp: ICommand = {
       name: "ادارة", aliases: ["manage", "إدارة", "management"],
       description: "عرض أوامر إدارة القروب", usage: "ادارة",
-      category: "util", adminOnly: false, hidden: false,
+      category: "admin", adminOnly: false, hidden: false,
       async execute(ctx) { await showHelp(ctx); },
     };
 
