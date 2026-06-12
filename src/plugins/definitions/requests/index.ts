@@ -11,6 +11,7 @@ interface RawThread {
   threadName?: string;
   isGroup:     boolean;
   folder?:     string;
+  participants?: Array<{ userID?: string }>;
 }
 
 interface IFcaRequestsApi {
@@ -40,12 +41,15 @@ interface IMiraiRequests { getApi(): IFcaRequestsApi | null; }
 interface PendingEntry {
   threadID: string;
   name:     string;
-  folder:   "PENDING" | "SPAM";
+  folder:   string;
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
 const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
+
+// ALL known FCA tags that may contain pending/spam group invites
+const FETCH_TAGS = ["PENDING", "SPAM", "OTHER", "ARCHIVED", "INBOX"];
 
 function getApi(pCtx: IPluginContext): IFcaRequestsApi | null {
   return (
@@ -55,20 +59,26 @@ function getApi(pCtx: IPluginContext): IFcaRequestsApi | null {
   );
 }
 
-/**
- * Fetch a thread list by tag — resolves to [] on error or timeout.
- */
-function safeGetList(api: IFcaRequestsApi, tag: string): Promise<RawThread[]> {
+interface TagResult { tag: string; list: RawThread[]; err: string | null; }
+
+function fetchTag(api: IFcaRequestsApi, tag: string): Promise<TagResult> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve([]), 14_000);
+    const timer = setTimeout(
+      () => resolve({ tag, list: [], err: "timeout" }),
+      14_000,
+    );
     try {
       api.getThreadList(50, null, [tag], (err, list) => {
         clearTimeout(timer);
-        resolve(Array.isArray(list) ? list : []);
+        resolve({
+          tag,
+          list: Array.isArray(list) ? list : [],
+          err:  err ? String(err) : null,
+        });
       });
-    } catch {
+    } catch (e) {
       clearTimeout(timer);
-      resolve([]);
+      resolve({ tag, list: [], err: String(e) });
     }
   });
 }
@@ -78,91 +88,113 @@ function threadName(t: RawThread): string {
 }
 
 /**
- * Fetch ALL pending/spam groups.
+ * Fetch ALL non-INBOX threads from every known tag and
+ * combine them by de-duplicating on threadID.
  *
- * Strategy (matches MOMO):
- *  1. Fetch PENDING list, SPAM list, and INBOX list in parallel.
- *  2. Add every group from the PENDING list.
- *  3. Add every group from INBOX whose folder === "PENDING".
- *  4. Add every group from the SPAM list.
- *  5. Add every group from INBOX whose folder === "SPAM".
+ * Folder label priority:
+ *   explicit folder field > tag name
  *
- * This dual-source approach catches groups that appear in INBOX
- * with a folder tag instead of appearing in the dedicated lists.
+ * Treats anything NOT in INBOX as a pending/request thread,
+ * regardless of whether it is a group or DM.
  */
-async function fetchPendingGroups(
-  api:    IFcaRequestsApi,
-  pCtx:   IPluginContext,
-): Promise<PendingEntry[]> {
-  const [pendingList, spamList, inboxList] = await Promise.all([
-    safeGetList(api, "PENDING"),
-    safeGetList(api, "SPAM"),
-    safeGetList(api, "INBOX"),
-  ]);
+async function fetchAllPending(
+  api:  IFcaRequestsApi,
+  pCtx: IPluginContext,
+): Promise<{ entries: PendingEntry[]; diagnostics: string }> {
+  const results = await Promise.all(FETCH_TAGS.map((t) => fetchTag(api, t)));
 
-  pCtx.logger.info("RequestsPlugin: raw counts.", {
-    pending: pendingList.length,
-    spam:    spamList.length,
-    inbox:   inboxList.length,
+  // Build diagnostics line
+  const diagParts = results.map((r) => {
+    const lbl = r.err === "timeout" ? "⏱" : r.err ? "✗" : `${r.list.length}`;
+    return `${r.tag}:${lbl}`;
   });
+  const diagnostics = diagParts.join("  ");
+
+  pCtx.logger.info("RequestsPlugin: tag fetch results.", {
+    summary: diagnostics,
+  });
+
+  // Separate INBOX threads (used only as fallback source for folder labels)
+  const inboxResult  = results.find((r) => r.tag === "INBOX");
+  const inboxThreads = inboxResult?.list ?? [];
+
+  // All non-INBOX tags
+  const nonInboxResults = results.filter((r) => r.tag !== "INBOX");
 
   const seen    = new Set<string>();
   const entries: PendingEntry[] = [];
 
-  const add = (t: RawThread, folder: "PENDING" | "SPAM"): void => {
-    if (!t.threadID || seen.has(t.threadID)) return;
-    seen.add(t.threadID);
-    entries.push({ threadID: t.threadID, name: threadName(t), folder });
-  };
-
-  // ── PENDING ──────────────────────────────────────────────────────────
-  for (const t of pendingList)                                    add(t, "PENDING");
-  for (const t of inboxList.filter(x => x.folder === "PENDING")) add(t, "PENDING");
-
-  // ── SPAM ─────────────────────────────────────────────────────────────
-  for (const t of spamList)                                       add(t, "SPAM");
-  for (const t of inboxList.filter(x => x.folder === "SPAM"))    add(t, "SPAM");
-
-  pCtx.logger.info("RequestsPlugin: resolved entries.", { count: entries.length });
-  return entries;
-}
-
-function buildListMessage(entries: PendingEntry[]): string {
-  if (entries.length === 0) {
-    return (
-      `${HEADER}\n\n` +
-      "✅ لا توجد قروبات معلقة أو سبام.\n\n" +
-      "⌯ إذا كان هناك قروب في Spam في ماسنجر ولم يظهر،\n" +
-      "   افتح الماسنجر وتأكد أن البوت كُلِّف في الرسائل المعلقة."
-    );
-  }
-
-  const pending = entries.filter((e) => e.folder === "PENDING");
-  const spam    = entries.filter((e) => e.folder === "SPAM");
-  const lines: string[] = [HEADER, "", "📋 القروبات المعلقة:", ""];
-
-  if (pending.length > 0) {
-    lines.push(`📥 الانتظار (${pending.length}):`);
-    for (const e of pending) {
-      lines.push(`  ${entries.indexOf(e) + 1}. ${e.name}`);
-      lines.push(`     🔑 ${e.threadID}`);
-      lines.push("");
+  // 1. Add threads from dedicated tags (PENDING, SPAM, OTHER, ARCHIVED)
+  for (const res of nonInboxResults) {
+    for (const t of res.list) {
+      if (!t.threadID || seen.has(t.threadID)) continue;
+      seen.add(t.threadID);
+      const folderLabel = t.folder ?? res.tag;
+      entries.push({ threadID: t.threadID, name: threadName(t), folder: folderLabel });
     }
   }
 
-  if (spam.length > 0) {
-    lines.push(`⚠️ السبام (${spam.length}):`);
-    for (const e of spam) {
-      lines.push(`  ${entries.indexOf(e) + 1}. ${e.name}`);
+  // 2. Cross-reference INBOX: pick up any thread whose folder != INBOX
+  for (const t of inboxThreads) {
+    if (!t.threadID || seen.has(t.threadID)) continue;
+    const folderLabel = t.folder;
+    if (!folderLabel || folderLabel === "INBOX") continue; // skip normal inbox
+    seen.add(t.threadID);
+    entries.push({ threadID: t.threadID, name: threadName(t), folder: folderLabel });
+  }
+
+  return { entries, diagnostics };
+}
+
+function folderEmoji(folder: string): string {
+  const f = folder.toUpperCase();
+  if (f === "PENDING") return "📥";
+  if (f === "SPAM")    return "⚠️";
+  if (f === "OTHER")   return "📂";
+  if (f === "ARCHIVED") return "🗃";
+  return "📌";
+}
+
+function buildListMessage(entries: PendingEntry[], diagnostics: string): string {
+  const diagLine = `⌯ [API: ${diagnostics}]`;
+
+  if (entries.length === 0) {
+    return (
+      `${HEADER}\n\n` +
+      "✅ لا توجد قروبات أو رسائل معلقة.\n\n" +
+      diagLine + "\n\n" +
+      "💡 إذا رأيت قروباً في ماسنجر ضمن «طلبات المراسلة»\n" +
+      "   وهو لا يظهر هنا، جرّب «طلبات فحص [ID]» لإرساله يدوياً.\n" +
+      "   أو افتح ماسنجر واقبل الطلب يدوياً ثم استخدم الأوامر."
+    );
+  }
+
+  const lines: string[] = [HEADER, "", `📋 الطلبات المعلقة (${entries.length}):`, "", diagLine, ""];
+
+  // Group by folder
+  const byFolder = new Map<string, PendingEntry[]>();
+  for (const e of entries) {
+    const arr = byFolder.get(e.folder) ?? [];
+    arr.push(e);
+    byFolder.set(e.folder, arr);
+  }
+
+  let idx = 1;
+  for (const [folder, folderEntries] of byFolder) {
+    lines.push(`${folderEmoji(folder)} ${folder} (${folderEntries.length}):`);
+    for (const e of folderEntries) {
+      lines.push(`  ${idx}. ${e.name}`);
       lines.push(`     🔑 ${e.threadID}`);
       lines.push("");
+      idx++;
     }
   }
 
   lines.push("─────────────────────────────");
   lines.push("⌯ الأوامر:");
-  lines.push("  طلبات قبول [رقم] — الدخول للقروب ✅");
-  lines.push("  طلبات حذف [رقم]  — رفض/حذف القروب 🗑");
+  lines.push("  طلبات قبول [رقم]    — قبول/دخول ✅");
+  lines.push("  طلبات حذف [رقم]     — رفض/حذف 🗑");
+  lines.push("  طلبات فحص [threadID] — قبول بمعرّف مباشر");
 
   return lines.join("\n");
 }
@@ -172,8 +204,8 @@ function buildListMessage(entries: PendingEntry[]): string {
 class RequestsPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "requests",
-    version:     "1.1.0",
-    description: "عرض وإدارة القروبات المعلقة (PENDING) والسبام (SPAM).",
+    version:     "1.2.0",
+    description: "عرض وإدارة القروبات المعلقة من كل مجلدات Messenger.",
     author:      "Sixseven-6677",
   };
 
@@ -190,8 +222,8 @@ class RequestsPlugin implements IPlugin {
     const cmd: ICommand = {
       name:        "طلبات",
       aliases:     ["requests", "pending", "spam"],
-      description: "عرض القروبات المعلقة والسبام مع إمكانية القبول أو الرفض",
-      usage:       "طلبات | طلبات قبول [رقم] | طلبات حذف [رقم]",
+      description: "عرض القروبات المعلقة من كل المجلدات مع إمكانية القبول أو الرفض",
+      usage:       "طلبات | طلبات قبول [رقم] | طلبات حذف [رقم] | طلبات فحص [ID]",
       category:    "admin",
       adminOnly:   true,
       hidden:      false,
@@ -209,13 +241,37 @@ class RequestsPlugin implements IPlugin {
 
         // ── List ─────────────────────────────────────────────────────────
         if (!sub || sub === "قائمة" || sub === "list") {
-          await ctx.reply("🔍 جاري جلب القروبات المعلقة والسبام...");
-          const entries = await fetchPendingGroups(api, pCtx);
-          await ctx.reply(buildListMessage(entries));
+          await ctx.reply("🔍 جاري فحص كل مجلدات الطلبات...");
+          const { entries, diagnostics } = await fetchAllPending(api, pCtx);
+          await ctx.reply(buildListMessage(entries, diagnostics));
           return;
         }
 
-        // ── Accept / Reject ───────────────────────────────────────────────
+        // ── Direct ID accept (طلبات فحص [threadID]) ──────────────────────
+        if (sub === "فحص" || sub === "direct" || sub === "id") {
+          const rawId = ctx.getArg(1)?.trim();
+          if (!rawId) {
+            await ctx.reply("📌 مثال: طلبات فحص 100123456789012345");
+            return;
+          }
+          try {
+            await new Promise<void>((res, rej) => {
+              api.handleMessageRequest(rawId, true, (err) => (err ? rej(err) : res()));
+            });
+            pCtx.logger.info("RequestsPlugin: direct accept.", { threadID: rawId, by: ctx.user.id });
+            await ctx.reply(`${HEADER}\n\n✅ تم قبول الطلب للمعرّف:\n🔑 ${rawId}`);
+          } catch (err) {
+            // Fallback: try joining as removeUserFromGroup inverse
+            await ctx.reply(
+              `❌ تعذّر القبول المباشر.\n` +
+              `${err instanceof Error ? err.message : String(err)}\n\n` +
+              `💡 جرّب قبوله يدوياً من الماسنجر.`
+            );
+          }
+          return;
+        }
+
+        // ── Accept / Delete ───────────────────────────────────────────────
         const isAccept = sub === "قبول"  || sub === "accept" || sub === "دخول";
         const isDelete  = sub === "حذف"  || sub === "delete"  || sub === "رفض"  || sub === "reject";
 
@@ -232,95 +288,74 @@ class RequestsPlugin implements IPlugin {
             return;
           }
 
-          await ctx.reply("🔍 جاري جلب القروبات...");
-          const entries = await fetchPendingGroups(api, pCtx);
+          await ctx.reply("🔍 جاري جلب الطلبات...");
+          const { entries } = await fetchAllPending(api, pCtx);
 
           if (entries.length === 0) {
-            await ctx.reply("✅ لا توجد قروبات معلقة.");
+            await ctx.reply("✅ لا توجد طلبات معلقة.");
             return;
           }
 
           const entry = entries[idx - 1];
           if (!entry) {
-            await ctx.reply(
-              `⚠️ الرقم ${idx} غير موجود.\n` +
-              `القروبات المتاحة: 1–${entries.length}`
-            );
+            await ctx.reply(`⚠️ الرقم ${idx} غير موجود. الطلبات المتاحة: 1–${entries.length}`);
             return;
           }
 
           if (isAccept) {
             try {
               await new Promise<void>((res, rej) => {
-                api.handleMessageRequest(entry.threadID, true, (err) =>
-                  err ? rej(err) : res()
-                );
+                api.handleMessageRequest(entry.threadID, true, (err) => (err ? rej(err) : res()));
               });
-              pCtx.logger.info("RequestsPlugin: accepted.", {
-                threadID: entry.threadID, name: entry.name, by: ctx.user.id,
-              });
-              await ctx.reply(
-                `${HEADER}\n\n` +
-                `✅ تم القبول والدخول إلى القروب:\n📛 ${entry.name}`
-              );
+              pCtx.logger.info("RequestsPlugin: accepted.", { threadID: entry.threadID, name: entry.name, by: ctx.user.id });
+              await ctx.reply(`${HEADER}\n\n✅ تم القبول والدخول إلى:\n📛 ${entry.name}`);
             } catch (err) {
               pCtx.logger.warn("RequestsPlugin: accept failed.", { error: String(err) });
-              await ctx.reply(
-                `❌ تعذّر القبول.\n` +
-                `${err instanceof Error ? err.message : String(err)}`
-              );
+              await ctx.reply(`❌ تعذّر القبول.\n${err instanceof Error ? err.message : String(err)}`);
             }
           } else {
-            // Try handleMessageRequest(false) first, fallback to removeUserFromGroup
             let done = false;
             try {
               await new Promise<void>((res, rej) => {
-                api.handleMessageRequest(entry.threadID, false, (err) =>
-                  err ? rej(err) : res()
-                );
+                api.handleMessageRequest(entry.threadID, false, (err) => (err ? rej(err) : res()));
               });
               done = true;
-            } catch { /* try fallback */ }
+            } catch { /* fallback */ }
 
             if (!done) {
               try {
                 const botId = api.getCurrentUserID();
                 await new Promise<void>((res, rej) => {
-                  api.removeUserFromGroup(botId, entry.threadID, (err) =>
-                    err ? rej(err) : res()
-                  );
+                  api.removeUserFromGroup(botId, entry.threadID, (err) => (err ? rej(err) : res()));
                 });
                 done = true;
               } catch { /* ignore */ }
             }
 
             if (done) {
-              pCtx.logger.info("RequestsPlugin: rejected/left.", {
-                threadID: entry.threadID, name: entry.name, by: ctx.user.id,
-              });
-              await ctx.reply(
-                `${HEADER}\n\n🗑 تم رفض/حذف القروب:\n📛 ${entry.name}`
-              );
+              pCtx.logger.info("RequestsPlugin: rejected.", { threadID: entry.threadID, name: entry.name, by: ctx.user.id });
+              await ctx.reply(`${HEADER}\n\n🗑 تم رفض/حذف:\n📛 ${entry.name}`);
             } else {
-              await ctx.reply(`❌ تعذّر حذف القروب: ${entry.name}`);
+              await ctx.reply(`❌ تعذّر الحذف: ${entry.name}`);
             }
           }
           return;
         }
 
-        // ── Unknown sub-command ───────────────────────────────────────────
+        // ── Unknown ───────────────────────────────────────────────────────
         await ctx.reply(
           `⚠️ أمر غير معروف: «${sub}»\n\n` +
-          "📌 الأوامر المتاحة:\n" +
-          "  طلبات              — عرض القائمة\n" +
-          "  طلبات قبول [رقم]  — قبول دخول قروب\n" +
-          "  طلبات حذف [رقم]   — رفض/حذف قروب"
+          "📌 الأوامر:\n" +
+          "  طلبات                 — عرض القائمة\n" +
+          "  طلبات قبول [رقم]     — قبول\n" +
+          "  طلبات حذف [رقم]      — رفض\n" +
+          "  طلبات فحص [threadID] — قبول بمعرّف مباشر"
         );
       },
     };
 
     pCtx.registerCommand(cmd);
-    pCtx.logger.info(`RequestsPlugin v1.1 enabled. Command "طلبات" registered.`);
+    pCtx.logger.info(`RequestsPlugin v1.2 enabled. Command "طلبات" registered.`);
   }
 
   async onDisable(): Promise<void> { this.ctx.logger.info("RequestsPlugin disabled."); }
