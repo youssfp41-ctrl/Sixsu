@@ -366,19 +366,26 @@ async function handleSetNickname(
     await sleep(1_000);
   }
 
+  let nickBotRestoreOk = true;
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
       pCtx.logger.info("Bot nickname restored after set-nickname.", { threadID: ctx.thread.id, botNick });
-    } catch { /* best effort */ }
+    } catch (err) {
+      nickBotRestoreOk = false;
+      pCtx.logger.warn("Failed to restore bot nickname after set-nickname.", {
+        threadID: ctx.thread.id, botNick, error: String(err),
+      });
+    }
   }
 
   saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
   pCtx.logger.info("Nicknames set.", { threadID: ctx.thread.id, nick, ok, failed });
 
   const lines = [HEADER, "", `✅ تم تعيين الكنية: "${nick}"`, `⌯ نجح: ${ok} عضو`];
-  if (failed > 0) lines.push(`⌯ فشل: ${failed} عضو`);
-  if (botNick)    lines.push(`⌯ اسم البوت محمي: "${botNick}"`);
+  if (failed > 0)               lines.push(`⌯ فشل: ${failed} عضو`);
+  if (botNick && nickBotRestoreOk)  lines.push(`⌯ اسم البوت محمي: "${botNick}"`);
+  if (botNick && !nickBotRestoreOk) lines.push(`⚠️ تعذّر استعادة اسم البوت — أعد تعيينه: بوت ${botNick}`);
   await ctx.reply(lines.join("\n"));
 }
 
@@ -499,10 +506,16 @@ async function handleClearNicknames(
     await sleep(1_000);
   }
 
+  let clearBotRestoreOk = true;
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
-    } catch { /* best effort */ }
+    } catch (err) {
+      clearBotRestoreOk = false;
+      pCtx.logger.warn("Failed to restore bot nickname after clear-nicknames.", {
+        threadID: ctx.thread.id, botNick, error: String(err),
+      });
+    }
   }
 
   const threadState = getThreadState(store, ctx.thread.id);
@@ -513,8 +526,9 @@ async function handleClearNicknames(
   pCtx.logger.info("All nicknames cleared.", { threadID: ctx.thread.id, ok, failed });
 
   const lines = [HEADER, "", "✅ تم مسح جميع الكنيات", `⌯ نجح: ${ok} عضو`];
-  if (failed > 0) lines.push(`⌯ فشل: ${failed} عضو`);
-  if (botNick)    lines.push(`⌯ اسم البوت محمي: "${botNick}"`);
+  if (failed > 0)                lines.push(`⌯ فشل: ${failed} عضو`);
+  if (botNick && clearBotRestoreOk)  lines.push(`⌯ اسم البوت محمي: "${botNick}"`);
+  if (botNick && !clearBotRestoreOk) lines.push(`⚠️ تعذّر استعادة اسم البوت — أعد تعيينه: بوت ${botNick}`);
   await ctx.reply(lines.join("\n"));
 }
 
