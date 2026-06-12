@@ -5,6 +5,16 @@ import { LoggerManager } from "../logger/LoggerManager";
 
 const log = LoggerManager.getLogger("DatabaseManager");
 
+const CONNECT_OPTIONS: mongoose.ConnectOptions = {
+  serverSelectionTimeoutMS: 15_000,
+  socketTimeoutMS:          45_000,
+  connectTimeoutMS:         15_000,
+  maxPoolSize:              10,
+  minPoolSize:              2,
+  retryWrites:              true,
+  w:                        "majority",
+};
+
 export class DatabaseManager implements ISystem {
   readonly name = "database";
 
@@ -14,36 +24,15 @@ export class DatabaseManager implements ISystem {
     const uri = config.database.mongoUri;
 
     if (!uri) {
-      log.warn("MONGODB_URI is not set — skipping database connection. Features requiring DB will be unavailable.");
+      log.warn(
+        "MONGODB_URI is not set — skipping database connection. " +
+        "Features requiring DB will be unavailable."
+      );
       return;
     }
 
-    await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 10_000,
-      socketTimeoutMS:          45_000,
-    });
-
-    this.connection = mongoose.connection;
-
-    this.connection.on("disconnected", () => {
-      log.warn(
-        "MongoDB disconnected. Mongoose will attempt automatic reconnection. " +
-        "If the bot is not in shutdown, check your network and MongoDB host."
-      );
-    });
-
-    this.connection.on("reconnected", () => {
-      log.info("MongoDB reconnected successfully.");
-    });
-
-    this.connection.on("error", (err: Error) => {
-      log.error("MongoDB connection error.", err);
-    });
-
-    log.info("Connected to MongoDB.", {
-      host: mongoose.connection.host,
-      name: mongoose.connection.name,
-    });
+    log.info("Connecting to MongoDB...");
+    await this.connectWithRetry(uri, 1);
   }
 
   async destroy(): Promise<void> {
@@ -63,5 +52,65 @@ export class DatabaseManager implements ISystem {
       throw new Error("Not connected to MongoDB.");
     }
     return this.connection;
+  }
+
+  // ── Private ─────────────────────────────────────────────────────────────────
+
+  private setupEventListeners(): void {
+    if (!this.connection) return;
+
+    this.connection.on("disconnected", () => {
+      log.warn(
+        "MongoDB disconnected. Mongoose will attempt automatic reconnection. " +
+        "If this persists, check your MongoDB host and network."
+      );
+    });
+
+    this.connection.on("reconnected", () => {
+      log.info("MongoDB reconnected successfully.");
+    });
+
+    this.connection.on("error", (err: Error) => {
+      log.error("MongoDB connection error.", err);
+    });
+
+    this.connection.on("close", () => {
+      log.warn("MongoDB connection closed.");
+    });
+  }
+
+  private async connectWithRetry(uri: string, attempt: number): Promise<void> {
+    const maxAttempts = 3;
+
+    try {
+      await mongoose.connect(uri, CONNECT_OPTIONS);
+      this.connection = mongoose.connection;
+      this.setupEventListeners();
+
+      log.info("Connected to MongoDB.", {
+        host:     mongoose.connection.host,
+        name:     mongoose.connection.name,
+        readyState: mongoose.connection.readyState,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      if (attempt < maxAttempts) {
+        const delay = attempt * 5_000;
+        log.warn(
+          `MongoDB connection failed (attempt ${attempt}/${maxAttempts}) — ` +
+          `retrying in ${delay / 1_000}s.`,
+          { error: msg }
+        );
+        await new Promise<void>((r) => setTimeout(r, delay));
+        return this.connectWithRetry(uri, attempt + 1);
+      }
+
+      log.error(
+        `MongoDB connection failed after ${maxAttempts} attempts. ` +
+        "Bot will run without database persistence.",
+        { error: msg }
+      );
+    }
   }
 }
