@@ -11,6 +11,24 @@ interface ISenderService {
   sendText(recipientId: string, text: string): Promise<void>;
 }
 
+// ─── Repository interface (loose coupling) ───────────────────────────────────
+
+interface IBlackConfigRepository {
+  findAll(): Promise<Array<{
+    threadId:    string;
+    message:     string;
+    intervalSec: number;
+    active:      boolean;
+    lastSentAt:  Date | null;
+  }>>;
+  upsert(threadId: string, data: Partial<{
+    message:     string;
+    intervalSec: number;
+    active:      boolean;
+    lastSentAt:  Date | null;
+  }>): Promise<void>;
+}
+
 // ─── Persistent store ─────────────────────────────────────────────────────────
 
 interface ThreadConfig {
@@ -37,10 +55,12 @@ function loadStore(): StoreData {
   return { threads: {} };
 }
 
-function saveStore(data: StoreData): void {
-  const dir = path.dirname(DATA_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
+function saveStoreFile(data: StoreData): void {
+  try {
+    const dir = path.dirname(DATA_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
+  } catch { /* best effort */ }
 }
 
 function getThread(store: StoreData, threadId: string): ThreadConfig {
@@ -64,23 +84,48 @@ const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ
 class BlackPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "black",
-    version:     "1.0.0",
-    description: "إرسال رسالة تلقائية متكررة داخل القروب بفاصل زمني يحدده الأدمن.",
+    version:     "2.0.0",
+    description: "إرسال رسالة تلقائية متكررة داخل القروب بفاصل زمني يحدده الأدمن. يحفظ في MongoDB.",
     author:      "Sixseven-6677",
   };
 
   private ctx!:         IPluginContext;
   private store:        StoreData                    = { threads: {} };
   private activeTimers: Map<string, IDisposable>     = new Map();
+  private repo:         IBlackConfigRepository | null = null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   async onLoad(ctx: IPluginContext): Promise<void> {
-    this.ctx   = ctx;
-    this.store = loadStore();
-    ctx.logger.info("BlackPlugin loaded.", {
-      threads: Object.keys(this.store.threads).length,
-    });
+    this.ctx  = ctx;
+    this.repo = ctx.consumeService<IBlackConfigRepository>("black-config-repo") ?? null;
+
+    if (this.repo) {
+      try {
+        const docs = await this.repo.findAll();
+        for (const doc of docs) {
+          this.store.threads[doc.threadId] = {
+            message:     doc.message,
+            intervalSec: doc.intervalSec,
+            active:      doc.active,
+            lastSentAt:  doc.lastSentAt ? doc.lastSentAt.toISOString() : null,
+          };
+        }
+        ctx.logger.info("BlackPlugin: loaded from MongoDB.", {
+          threads: docs.length,
+        });
+      } catch (err) {
+        ctx.logger.warn("BlackPlugin: MongoDB load failed — falling back to file.", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.store = loadStore();
+      }
+    } else {
+      this.store = loadStore();
+      ctx.logger.info("BlackPlugin: loaded from file.", {
+        threads: Object.keys(this.store.threads).length,
+      });
+    }
   }
 
   async onEnable(): Promise<void> {
@@ -103,19 +148,60 @@ class BlackPlugin implements IPlugin {
   }
 
   async onDisable(): Promise<void> {
-    // Stop all running timers (dispose each)
+    // Stop all running timers
     for (const [threadId, disposable] of this.activeTimers) {
       disposable.dispose();
       this.ctx.logger.debug("Black: timer stopped on disable.", { threadId });
     }
     this.activeTimers.clear();
-    saveStore(this.store);
+    await this.saveAll("onDisable");
     this.ctx.logger.info("BlackPlugin disabled.");
   }
 
   async onUnload(): Promise<void> {
-    saveStore(this.store);
+    await this.saveAll("onUnload");
     this.ctx.logger.info("BlackPlugin unloaded.");
+  }
+
+  // ── Persistence helpers ───────────────────────────────────────────────────
+
+  private saveThread(threadId: string): void {
+    const cfg = this.store.threads[threadId];
+    if (!cfg) return;
+
+    if (this.repo) {
+      this.repo.upsert(threadId, {
+        message:     cfg.message,
+        intervalSec: cfg.intervalSec,
+        active:      cfg.active,
+        lastSentAt:  cfg.lastSentAt ? new Date(cfg.lastSentAt) : null,
+      }).catch((err: unknown) => {
+        this.ctx.logger.warn("BlackPlugin: MongoDB thread save failed.", {
+          threadId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // File fallback on MongoDB failure
+        saveStoreFile(this.store);
+      });
+    } else {
+      saveStoreFile(this.store);
+    }
+  }
+
+  private async saveAll(caller: string): Promise<void> {
+    if (this.repo) {
+      const promises = Object.keys(this.store.threads).map((threadId) =>
+        this.repo!.upsert(threadId, this.store.threads[threadId]!).catch((err: unknown) => {
+          this.ctx.logger.warn(`BlackPlugin.${caller}: MongoDB save failed for thread.`, {
+            threadId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+      );
+      await Promise.allSettled(promises);
+    } else {
+      saveStoreFile(this.store);
+    }
   }
 
   // ── Timer helpers ─────────────────────────────────────────────────────────
@@ -123,7 +209,8 @@ class BlackPlugin implements IPlugin {
   private startTimer(pCtx: IPluginContext, threadId: string): void {
     if (this.activeTimers.has(threadId)) return; // Already running — no duplicates
 
-    const store = this.store;
+    const store  = this.store;
+    const plugin = this;
 
     const disposable = pCtx.scheduleRecurring({
       name:           `black:${threadId}`,
@@ -142,7 +229,17 @@ class BlackPlugin implements IPlugin {
         try {
           await sender.sendText(threadId, cfg.message);
           cfg.lastSentAt = new Date().toISOString();
-          saveStore(store);
+          // Save only the lastSentAt update — fire-and-forget
+          if (plugin.repo) {
+            plugin.repo.upsert(threadId, { lastSentAt: new Date() }).catch((err: unknown) => {
+              pCtx.logger.warn("Black: MongoDB lastSentAt update failed.", {
+                threadId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          } else {
+            saveStoreFile(store);
+          }
           pCtx.logger.debug("Black: message sent.", { threadId });
         } catch (err) {
           pCtx.logger.warn("Black: failed to send message.", {
@@ -262,7 +359,7 @@ class BlackPlugin implements IPlugin {
     }
 
     config.active = true;
-    saveStore(this.store);
+    this.saveThread(ctx.thread.id);
     this.startTimer(pCtx, ctx.thread.id);
 
     pCtx.logger.info("Black: enabled.", {
@@ -291,7 +388,7 @@ class BlackPlugin implements IPlugin {
     }
 
     config.active = false;
-    saveStore(this.store);
+    this.saveThread(ctx.thread.id);
     this.stopTimer(ctx.thread.id);
 
     pCtx.logger.info("Black: disabled.", {
@@ -326,7 +423,7 @@ class BlackPlugin implements IPlugin {
     const wasRunning = config.active && this.activeTimers.has(ctx.thread.id);
 
     config.message = newMessage;
-    saveStore(this.store);
+    this.saveThread(ctx.thread.id);
 
     pCtx.logger.info("Black: message updated.", {
       threadId: ctx.thread.id,
@@ -351,7 +448,7 @@ class BlackPlugin implements IPlugin {
     await ctx.typingOn();
 
     // args: [0]="وقت", [1] = seconds
-    const raw = ctx.getArg(1);
+    const raw     = ctx.getArg(1);
     const seconds = parseInt(raw ?? "", 10);
 
     if (!raw || isNaN(seconds) || seconds <= 0) {
@@ -368,7 +465,7 @@ class BlackPlugin implements IPlugin {
     const wasRunning = config.active && this.activeTimers.has(ctx.thread.id);
 
     config.intervalSec = seconds;
-    saveStore(this.store);
+    this.saveThread(ctx.thread.id);
 
     // If timer was running, restart it with the new interval
     if (wasRunning) {
@@ -410,7 +507,7 @@ class BlackPlugin implements IPlugin {
       return;
     }
 
-    const running = this.activeTimers.has(ctx.thread.id);
+    const running    = this.activeTimers.has(ctx.thread.id);
     const statusEmoji = running ? "🟢 مفعّل" : "🔴 غير مفعّل";
 
     const msgPreview = config.message
@@ -425,6 +522,8 @@ class BlackPlugin implements IPlugin {
       ? new Date(config.lastSentAt).toLocaleString("ar-SA")
       : "لم يُرسَل بعد";
 
+    const storage = this.repo ? "MongoDB ✓" : "ملف محلي";
+
     await ctx.reply([
       HEADER,
       "",
@@ -432,6 +531,7 @@ class BlackPlugin implements IPlugin {
       `⌯ الرسالة:       ${msgPreview}`,
       `⌯ الفاصل:        ${intervalStr}`,
       `⌯ آخر إرسال:     ${lastSent}`,
+      `⌯ التخزين:       ${storage}`,
     ].join("\n"));
   }
 
@@ -454,7 +554,7 @@ class BlackPlugin implements IPlugin {
       "  ↳ إيقاف الإرسال التلقائي",
       "",
       "• بلاك حالة",
-      "  ↳ عرض الإعدادات الحالية",
+      "  ↳ عرض الإعدادات الحالية والحالة",
     ].join("\n"));
   }
 }
