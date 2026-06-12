@@ -248,13 +248,6 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
           threadId:   event.threadId,
           lockedName,
         });
-        // Notify the group (angel-bot style)
-        try {
-          api.sendMessage(
-            `🛡 تم استعادة اسم القروب المحمي:\n"${lockedName}"`,
-            event.threadId,
-          );
-        } catch { /* best-effort */ }
       }
       resolve();
     });
