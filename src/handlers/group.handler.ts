@@ -192,6 +192,16 @@ export async function handleMemberLeft(
 
 // ── Protection handlers ────────────────────────────────────────────────────
 
+/**
+ * Handles the FCA name-changed event.
+ *
+ * Logic:
+ *  1. If protection is off → ignore.
+ *  2. If the new name already equals the locked name → no-op.
+ *  3. If `lastChangedBy === 'bot'` → the change came from /اسم command.
+ *     Consume the flag and skip revert to prevent bot-induced loops.
+ *  4. Otherwise → external change while protection is on → revert.
+ */
 export async function handleNameChanged(event: FBNameChangedEvent): Promise<void> {
   const store = getProtectionStore();
   const state = store.threads[event.threadId];
@@ -199,6 +209,19 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
   if (!state?.protectName || !state.lockedName) return;
   if (event.newName === state.lockedName) return;
 
+  // ── Bot-initiated change — skip revert to avoid loop ──────────────────
+  if (state.lastChangedBy === 'bot') {
+    log.info("GroupHandler: name_changed was bot-initiated (/اسم) — skipping revert.", {
+      threadId:  event.threadId,
+      newName:   event.newName,
+      lockedName: state.lockedName,
+    });
+    // Reset flag so subsequent external changes are handled normally
+    state.lastChangedBy = 'external';
+    return;
+  }
+
+  // ── External change while protection is active — revert ───────────────
   const api = getFcaApi();
   if (!api) {
     log.warn("GroupHandler: name_changed — protection active but FCA API unavailable.", {
@@ -207,7 +230,7 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
     return;
   }
 
-  log.warn("GroupHandler: name_changed — reverting to locked name.", {
+  log.warn("GroupHandler: name_changed — external change detected, reverting to locked name.", {
     threadId:   event.threadId,
     unwanted:   event.newName,
     lockedName: state.lockedName,
