@@ -60,6 +60,10 @@ import { UserRepository }                    from "./database/repositories/user.
 import { BotAdminRepository }               from "./database/repositories/botadmin.repository";
 import { GroupSettingsRepository }          from "./database/repositories/group-settings.repository";
 import { BanRepository }                    from "./database/repositories/ban.repository";
+import { BlackConfigRepository }            from "./database/repositories/black-config.repository";
+import { BotConfigRepository }              from "./database/repositories/bot-config.repository";
+import { CommandStatsRepository }           from "./database/repositories/command-stats.repository";
+import { runMigrationIfNeeded }             from "./database/migration";
 import { CacheManager }                      from "./cache/CacheManager";
 import { createCacheProvider }               from "./cache/providers/createProvider";
 import { UserService }                       from "./users/UserService";
@@ -425,6 +429,36 @@ async function bootstrap(): Promise<void> {
     svcReg.provide("fb-access-token", config.facebook.pageAccessToken, "core");
   }
 
+  // Pre-start MongoDB repos — provided BEFORE bot.register so plugins can consume them
+  // during onLoad. DatabaseManager initializes before PluginManager inside bot.start(),
+  // so DB is connected by the time any plugin's onLoad runs.
+  let botAdminRepo_:       BotAdminRepository     | null = null;
+  let groupSettingsRepo_:  GroupSettingsRepository | null = null;
+  let banRepo_:            BanRepository           | null = null;
+  let botConfigRepo_:      BotConfigRepository     | null = null;
+
+  if (mongoEnabled) {
+    botAdminRepo_      = new BotAdminRepository();
+    groupSettingsRepo_ = new GroupSettingsRepository();
+    banRepo_           = new BanRepository();
+    const blackConfigRepo = new BlackConfigRepository();
+    botConfigRepo_     = new BotConfigRepository();
+    const commandStatsRepo = new CommandStatsRepository();
+
+    adminStore.setRepository(botAdminRepo_);
+    lockdownStore.setRepository(groupSettingsRepo_);
+    banStore.setRepository(banRepo_);
+
+    svcReg.provide("group-settings-repo", groupSettingsRepo_,  "core");
+    svcReg.provide("ban-repo",            banRepo_,            "core");
+    svcReg.provide("botadmin-repo",       botAdminRepo_,       "core");
+    svcReg.provide("black-config-repo",   blackConfigRepo,     "core");
+    svcReg.provide("bot-config-repo",     botConfigRepo_,      "core");
+    svcReg.provide("command-stats-repo",  commandStatsRepo,    "core");
+
+    log.info("Database: MongoDB repos wired to stores and service registry (pre-start).");
+  }
+
   bot.register(pluginManager);
 
   // 8. Webhook routes (primary account handles webhook verification)
@@ -452,34 +486,31 @@ async function bootstrap(): Promise<void> {
   // 9. Start bot (initializes all registered systems, including DatabaseManager)
   await bot.start();
 
-  // 10. Post-start: wire MongoDB repositories to stores (DB is now connected)
-  if (mongoEnabled) {
+  // 10. Post-start: load persisted data from MongoDB into in-memory stores
+  // (DB is now connected; repos were wired pre-start so plugins already loaded their data)
+  if (mongoEnabled && botAdminRepo_ && groupSettingsRepo_ && banRepo_) {
     try {
-      const botAdminRepo       = new BotAdminRepository();
-      const groupSettingsRepo  = new GroupSettingsRepository();
-      const banRepo            = new BanRepository();
-
-      adminStore.setRepository(botAdminRepo);
-      lockdownStore.setRepository(groupSettingsRepo);
-      banStore.setRepository(banRepo);
-
       await Promise.all([
         adminStore.loadFromDatabase(),
         lockdownStore.loadFromDatabase(),
         banStore.loadFromDatabase(),
       ]);
 
-      svcReg.provide("group-settings-repo", groupSettingsRepo, "core");
-      svcReg.provide("ban-repo",            banRepo,           "core");
-      svcReg.provide("botadmin-repo",       botAdminRepo,      "core");
+      if (botConfigRepo_) {
+        await prefixStore.loadFromDatabase(botConfigRepo_);
+      }
 
-      log.info("Post-start: all stores wired to MongoDB and loaded.", {
+      // One-time migration: imports any existing data/*.json files into MongoDB
+      await runMigrationIfNeeded();
+
+      log.info("Post-start: all stores loaded from MongoDB.", {
         admins:        adminStore.size(),
         lockedThreads: lockdownStore.lockedCount,
         activeBans:    banStore.size,
+        prefix:        prefixStore.get(),
       });
     } catch (err) {
-      log.error("Post-start: failed to wire MongoDB repositories.", err);
+      log.error("Post-start: failed to load from MongoDB.", err);
     }
   }
 
