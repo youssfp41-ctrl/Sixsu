@@ -105,7 +105,7 @@ class MusicPlugin implements IPlugin {
       aliases:     ["ytb", "music", "يوتيوب", "أغاني", "اغنية"],
       description: "تحميل اغنية من يوتيوب وإرسالها كملف صوتي",
       usage:       "اغاني [اسم الاغنية أو رابط يوتيوب]",
-      category:    "general",
+      category:    "private",
       adminOnly:   false,
       hidden:      false,
 
