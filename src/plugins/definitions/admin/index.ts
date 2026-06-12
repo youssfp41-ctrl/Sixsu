@@ -296,7 +296,7 @@ class AdminPlugin implements IPlugin {
       aliases:     ["admins", "adminlist", "ادمنز"],
       description: "عرض قائمة الأدمن في القروب وإدارتهم",
       usage:       "ادمن | ادمن اضافة [id] | ادمن حذف [رقم/id]",
-      category:    "util",
+      category:    "admin",
       adminOnly:   false,
       hidden:      false,
 
