@@ -246,7 +246,7 @@ async function showHelp(ctx: Context): Promise<void> {
  * - يغير اسم القروب إلى الاسم الجديد
  * - يُفعّل الحماية تلقائياً على الاسم الجديد (protectName = true)
  * - يحفظ الاسم الجديد كاسم محمي (lockedName = newName)
- * - يضع lastChangedBy = 'bot' قبل setTitle لمنع handleNameChanged من عكس التغيير
+ * - يضع lockedName قبل setTitle — البوت يُعرَّف عبر event.changedBy===botId (بدون flags)
  * - أي تغيير خارجي بعدها يُعاد تلقائياً للاسم الجديد
  */
 async function handleGroupName(
