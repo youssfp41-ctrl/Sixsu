@@ -70,6 +70,7 @@ import { SessionStore }                      from "./facebook/session/SessionSto
 import { ReconnectManager }                  from "./facebook/reconnect/ReconnectManager";
 import { ProcessErrorHandler }               from "./errors/handlers/ProcessErrorHandler";
 import { PluginManager }                     from "./plugins/PluginManager";
+import { prefixStore }                      from "./prefix/PrefixStore";
 import { AuthCredentials }                   from "./facebook/auth/types/IAuth";
 import {
   setCommandPipeline, setCommandRegistry, setTaskScheduler,
@@ -306,7 +307,7 @@ async function bootstrap(): Promise<void> {
     .register(createCooldownMiddleware({ durationMs: 3_000 }))
     .register(createPermissionsMiddleware({ adminIds: config.bot.adminIds, adminStore }));
 
-  const pipeline = new CommandPipeline(registry, config.bot.prefix)
+  const pipeline = new CommandPipeline(registry, () => prefixStore.get())
     .use(mwManager.fn("banned"))
     .use(mwManager.fn("logging"))
     .use(mwManager.fn("lockdown"))
@@ -488,7 +489,7 @@ async function bootstrap(): Promise<void> {
       userId:    t.getCurrentUserId(),
       connected: t.isConnected(),
     })),
-    prefix:      config.bot.prefix,
+    prefix:      prefixStore.get(),
     nodeEnv:     config.nodeEnv,
     mongoDb:     mongoEnabled ? "connected" : "disabled — set MONGODB_URI for persistence",
     adminCount:  adminStore.size(),
