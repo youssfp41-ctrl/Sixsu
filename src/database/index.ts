@@ -19,4 +19,18 @@ export { BanRepository } from "./repositories/ban.repository";
 export { BanModel } from "./models/ban.model";
 export type { IBan, BanDocument } from "./models/ban.model";
 
+export { BlackConfigRepository } from "./repositories/black-config.repository";
+export type { BlackConfigUpdate } from "./repositories/black-config.repository";
+export { BlackConfigModel } from "./models/black-config.model";
+export type { IBlackConfig, BlackConfigDocument } from "./models/black-config.model";
+
+export { BotConfigRepository } from "./repositories/bot-config.repository";
+export { BotConfigModel } from "./models/bot-config.model";
+export type { IBotConfig, BotConfigDocument } from "./models/bot-config.model";
+
+export { CommandStatsRepository } from "./repositories/command-stats.repository";
+export type { CommandStatsSummary } from "./repositories/command-stats.repository";
+export { CommandStatsModel } from "./models/command-stats.model";
+export type { ICommandStats, CommandStatsDocument } from "./models/command-stats.model";
+
 export type { IRepository } from "./interfaces/IRepository";
