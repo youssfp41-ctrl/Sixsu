@@ -45,7 +45,7 @@ interface IMiraiTransportService {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐀𝐃𝐌𝐈𝐍𝐒🪽↴";
+const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
 
 function getApi(pluginCtx: IPluginContext): IFcaApiAdmin | null {
   const primary = pluginCtx.consumeService<IMiraiTransportService>("mirai-transport")?.getApi?.() ?? null;
