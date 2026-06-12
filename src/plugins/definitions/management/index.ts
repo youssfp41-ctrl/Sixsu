@@ -1,6 +1,7 @@
 import fs   from "fs";
 import path from "path";
 import { config }          from "../../../config/env";
+import { prefixStore }    from "../../../prefix/PrefixStore";
 import { IPlugin, PluginManifest } from "../../types/IPlugin";
 import { IPluginContext }          from "../../types/IPluginContext";
 import { ICommand }                from "../../../commands/types/ICommand";
@@ -234,7 +235,7 @@ async function assertGroupAdmin(
 // ─── /ادارة → help ───────────────────────────────────────────────────────────
 
 async function showHelp(ctx: Context): Promise<void> {
-  const prefix = config.bot.prefix || "/";
+  const prefix = prefixStore.get();
   await ctx.reply([
     HEADER, "",
     `⌯ اسم قروب — تغيير اسم القروب`,
