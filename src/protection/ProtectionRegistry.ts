@@ -3,13 +3,6 @@ export interface ThreadState {
   lockedName:       string;
   protectNicknames: boolean;
   nicknames:        Record<string, string>;
-  /**
-   * Transient in-memory flag — NOT persisted to DB or file.
-   * Set to 'bot' immediately before the bot calls setTitle via /اسم command.
-   * Checked in handleNameChanged to skip revert when the bot is the source.
-   * Always reset to 'external' on startup / after consumption.
-   */
-  lastChangedBy: 'bot' | 'external' | '';
 }
 
 export interface ProtectionStore {
