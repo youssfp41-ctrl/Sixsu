@@ -18,15 +18,15 @@ interface PipelineStep {
 }
 
 export class CommandPipeline {
-  private readonly registry: CommandRegistry;
-  private readonly prefix:   string;
+  private readonly registry:   CommandRegistry;
+  private readonly getPrefix:  () => string;
   /** Ordered list of named middleware steps. */
-  private readonly steps:    PipelineStep[] = [];
-  private notFoundHandler?:  NotFoundHandler;
+  private readonly steps:      PipelineStep[] = [];
+  private notFoundHandler?:    NotFoundHandler;
 
-  constructor(registry: CommandRegistry, prefix = "") {
-    this.registry = registry;
-    this.prefix   = prefix;
+  constructor(registry: CommandRegistry, prefix: string | (() => string) = "") {
+    this.registry  = registry;
+    this.getPrefix = typeof prefix === "function" ? prefix : () => prefix;
   }
 
   /**
@@ -69,15 +69,16 @@ export class CommandPipeline {
     // ── Step 2 · Prefix check ──────────────────────────────────────────────
     let rawName = ctx.commandName;
 
-    if (this.prefix) {
-      if (!rawName.startsWith(this.prefix)) {
+    const currentPrefix = this.getPrefix();
+    if (currentPrefix) {
+      if (!rawName.startsWith(currentPrefix)) {
         log.debug(
-          `[${traceId}] ✗ Prefix "${this.prefix}" not matched — not a command.`,
+          `[${traceId}] ✗ Prefix "${currentPrefix}" not matched — not a command.`,
           { rawName }
         );
         return;
       }
-      rawName = rawName.slice(this.prefix.length);
+      rawName = rawName.slice(currentPrefix.length);
       log.debug(`[${traceId}] ✓ Prefix matched — name: "${rawName}"`);
     }
 
@@ -109,7 +110,7 @@ export class CommandPipeline {
         `[${traceId}] ✗ minArgs failed: got ${ctx.args.length}, ` +
         `need ≥${command.minArgs} — sending usage hint.`
       );
-      const usage = command.usage ?? `${this.prefix}${command.name}`;
+      const usage = command.usage ?? `${this.getPrefix()}${command.name}`;
       await ctx.reply(
         `❌ هذا الأمر يتطلب ${command.minArgs} مُدخل/مُدخلات على الأقل.\n` +
         `📌 الاستخدام: ${usage}`
@@ -122,7 +123,7 @@ export class CommandPipeline {
         `[${traceId}] ✗ maxArgs failed: got ${ctx.args.length}, ` +
         `max is ${command.maxArgs} — sending usage hint.`
       );
-      const usage = command.usage ?? `${this.prefix}${command.name}`;
+      const usage = command.usage ?? `${this.getPrefix()}${command.name}`;
       await ctx.reply(
         `❌ هذا الأمر يقبل ${command.maxArgs} مُدخل/مُدخلات كحدٍّ أقصى.\n` +
         `📌 الاستخدام: ${usage}`
