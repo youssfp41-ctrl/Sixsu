@@ -273,7 +273,6 @@ async function handleGroupName(
   threadState.lockedName    = newName; // new protected reference
   threadState.protectName   = true;    // auto-enable protection
   setProtectionStore(store);
-  setProtectionStore(store);
 
   try {
     await fcaSetTitle(api, newName, ctx.thread.id);
@@ -292,7 +291,8 @@ async function handleGroupName(
       `🔒 تم تفعيل الحماية تلقائياً ضد التغيير الخارجي.`
     );
   } catch (err) {
-    // Revert flags on failure — don't leave stale state    threadState.protectName   = false;
+    // Revert flags on failure — don't leave stale state
+    threadState.protectName   = false;
     threadState.lockedName    = "";
     pCtx.logger.warn("setTitle failed.", { error: String(err) });
     await ctx.reply("⚠️ فشل تغيير اسم القروب. تأكد أن البوت أدمن في القروب.");
