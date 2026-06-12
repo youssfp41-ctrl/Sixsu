@@ -5,7 +5,7 @@ import { Context }                 from "../../../context/Context";
 
 // ─── Extended FCA types ────────────────────────────────────────────────────
 
-interface PendingThread {
+interface RawThread {
   threadID:    string;
   name?:       string;
   threadName?: string;
@@ -19,7 +19,7 @@ interface IFcaRequestsApi {
     limit:     number,
     timestamp: number | null,
     tags:      string[],
-    callback:  (err: Error | null, list: PendingThread[]) => void,
+    callback:  (err: Error | null, list: RawThread[]) => void,
   ): void;
   handleMessageRequest(
     threadID:  string,
@@ -55,7 +55,10 @@ function getApi(pCtx: IPluginContext): IFcaRequestsApi | null {
   );
 }
 
-function safeGetList(api: IFcaRequestsApi, tag: string): Promise<PendingThread[]> {
+/**
+ * Fetch a thread list by tag — resolves to [] on error or timeout.
+ */
+function safeGetList(api: IFcaRequestsApi, tag: string): Promise<RawThread[]> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve([]), 14_000);
     try {
@@ -70,41 +73,68 @@ function safeGetList(api: IFcaRequestsApi, tag: string): Promise<PendingThread[]
   });
 }
 
-async function fetchPendingGroups(api: IFcaRequestsApi): Promise<PendingEntry[]> {
-  const [pendingList, spamList] = await Promise.all([
+function threadName(t: RawThread): string {
+  return (t.name ?? t.threadName ?? "بدون اسم").trim();
+}
+
+/**
+ * Fetch ALL pending/spam groups.
+ *
+ * Strategy (matches MOMO):
+ *  1. Fetch PENDING list, SPAM list, and INBOX list in parallel.
+ *  2. Add every group from the PENDING list.
+ *  3. Add every group from INBOX whose folder === "PENDING".
+ *  4. Add every group from the SPAM list.
+ *  5. Add every group from INBOX whose folder === "SPAM".
+ *
+ * This dual-source approach catches groups that appear in INBOX
+ * with a folder tag instead of appearing in the dedicated lists.
+ */
+async function fetchPendingGroups(
+  api:    IFcaRequestsApi,
+  pCtx:   IPluginContext,
+): Promise<PendingEntry[]> {
+  const [pendingList, spamList, inboxList] = await Promise.all([
     safeGetList(api, "PENDING"),
     safeGetList(api, "SPAM"),
+    safeGetList(api, "INBOX"),
   ]);
+
+  pCtx.logger.info("RequestsPlugin: raw counts.", {
+    pending: pendingList.length,
+    spam:    spamList.length,
+    inbox:   inboxList.length,
+  });
 
   const seen    = new Set<string>();
   const entries: PendingEntry[] = [];
 
-  for (const t of pendingList) {
-    if (!t.isGroup || !t.threadID || seen.has(t.threadID)) continue;
+  const add = (t: RawThread, folder: "PENDING" | "SPAM"): void => {
+    if (!t.threadID || seen.has(t.threadID)) return;
     seen.add(t.threadID);
-    entries.push({
-      threadID: t.threadID,
-      name:     (t.name ?? t.threadName ?? "بدون اسم").trim(),
-      folder:   "PENDING",
-    });
-  }
+    entries.push({ threadID: t.threadID, name: threadName(t), folder });
+  };
 
-  for (const t of spamList) {
-    if (!t.isGroup || !t.threadID || seen.has(t.threadID)) continue;
-    seen.add(t.threadID);
-    entries.push({
-      threadID: t.threadID,
-      name:     (t.name ?? t.threadName ?? "بدون اسم").trim(),
-      folder:   "SPAM",
-    });
-  }
+  // ── PENDING ──────────────────────────────────────────────────────────
+  for (const t of pendingList)                                    add(t, "PENDING");
+  for (const t of inboxList.filter(x => x.folder === "PENDING")) add(t, "PENDING");
 
+  // ── SPAM ─────────────────────────────────────────────────────────────
+  for (const t of spamList)                                       add(t, "SPAM");
+  for (const t of inboxList.filter(x => x.folder === "SPAM"))    add(t, "SPAM");
+
+  pCtx.logger.info("RequestsPlugin: resolved entries.", { count: entries.length });
   return entries;
 }
 
 function buildListMessage(entries: PendingEntry[]): string {
   if (entries.length === 0) {
-    return `${HEADER}\n\n✅ لا توجد قروبات معلقة أو سبام.`;
+    return (
+      `${HEADER}\n\n` +
+      "✅ لا توجد قروبات معلقة أو سبام.\n\n" +
+      "⌯ إذا كان هناك قروب في Spam في ماسنجر ولم يظهر،\n" +
+      "   افتح الماسنجر وتأكد أن البوت كُلِّف في الرسائل المعلقة."
+    );
   }
 
   const pending = entries.filter((e) => e.folder === "PENDING");
@@ -114,8 +144,7 @@ function buildListMessage(entries: PendingEntry[]): string {
   if (pending.length > 0) {
     lines.push(`📥 الانتظار (${pending.length}):`);
     for (const e of pending) {
-      const n = entries.indexOf(e) + 1;
-      lines.push(`  ${n}. ${e.name}`);
+      lines.push(`  ${entries.indexOf(e) + 1}. ${e.name}`);
       lines.push(`     🔑 ${e.threadID}`);
       lines.push("");
     }
@@ -124,8 +153,7 @@ function buildListMessage(entries: PendingEntry[]): string {
   if (spam.length > 0) {
     lines.push(`⚠️ السبام (${spam.length}):`);
     for (const e of spam) {
-      const n = entries.indexOf(e) + 1;
-      lines.push(`  ${n}. ${e.name}`);
+      lines.push(`  ${entries.indexOf(e) + 1}. ${e.name}`);
       lines.push(`     🔑 ${e.threadID}`);
       lines.push("");
     }
@@ -144,7 +172,7 @@ function buildListMessage(entries: PendingEntry[]): string {
 class RequestsPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "requests",
-    version:     "1.0.0",
+    version:     "1.1.0",
     description: "عرض وإدارة القروبات المعلقة (PENDING) والسبام (SPAM).",
     author:      "Sixseven-6677",
   };
@@ -179,23 +207,21 @@ class RequestsPlugin implements IPlugin {
 
         const sub = ctx.getArg(0);
 
-        // ── List ────────────────────────────────────────────────────────
+        // ── List ─────────────────────────────────────────────────────────
         if (!sub || sub === "قائمة" || sub === "list") {
-          await ctx.reply("🔍 جاري جلب الطلبات...");
-          const entries = await fetchPendingGroups(api);
+          await ctx.reply("🔍 جاري جلب القروبات المعلقة والسبام...");
+          const entries = await fetchPendingGroups(api, pCtx);
           await ctx.reply(buildListMessage(entries));
           return;
         }
 
-        // ── Accept / Delete ─────────────────────────────────────────────
-        const isAccept =
-          sub === "قبول"  || sub === "accept" || sub === "دخول";
-        const isDelete  =
-          sub === "حذف"   || sub === "delete" || sub === "رفض" || sub === "reject";
+        // ── Accept / Reject ───────────────────────────────────────────────
+        const isAccept = sub === "قبول"  || sub === "accept" || sub === "دخول";
+        const isDelete  = sub === "حذف"  || sub === "delete"  || sub === "رفض"  || sub === "reject";
 
         if (isAccept || isDelete) {
-          const idxArg = ctx.getArg(1);
-          const idx    = idxArg ? parseInt(idxArg, 10) : NaN;
+          const idxStr = ctx.getArg(1);
+          const idx    = idxStr ? parseInt(idxStr, 10) : NaN;
 
           if (isNaN(idx) || idx < 1) {
             await ctx.reply(
@@ -206,8 +232,8 @@ class RequestsPlugin implements IPlugin {
             return;
           }
 
-          await ctx.reply("🔍 جاري جلب الطلبات...");
-          const entries = await fetchPendingGroups(api);
+          await ctx.reply("🔍 جاري جلب القروبات...");
+          const entries = await fetchPendingGroups(api, pCtx);
 
           if (entries.length === 0) {
             await ctx.reply("✅ لا توجد قروبات معلقة.");
@@ -230,23 +256,33 @@ class RequestsPlugin implements IPlugin {
                   err ? rej(err) : res()
                 );
               });
-              pCtx.logger.info("RequestsPlugin: accepted.", { threadID: entry.threadID, name: entry.name, by: ctx.user.id });
-              await ctx.reply(`${HEADER}\n\n✅ تم القبول والدخول إلى القروب:\n📛 ${entry.name}`);
+              pCtx.logger.info("RequestsPlugin: accepted.", {
+                threadID: entry.threadID, name: entry.name, by: ctx.user.id,
+              });
+              await ctx.reply(
+                `${HEADER}\n\n` +
+                `✅ تم القبول والدخول إلى القروب:\n📛 ${entry.name}`
+              );
             } catch (err) {
               pCtx.logger.warn("RequestsPlugin: accept failed.", { error: String(err) });
-              await ctx.reply(`❌ تعذّر القبول.\n${err instanceof Error ? err.message : String(err)}`);
+              await ctx.reply(
+                `❌ تعذّر القبول.\n` +
+                `${err instanceof Error ? err.message : String(err)}`
+              );
             }
           } else {
             // Try handleMessageRequest(false) first, fallback to removeUserFromGroup
+            let done = false;
             try {
               await new Promise<void>((res, rej) => {
                 api.handleMessageRequest(entry.threadID, false, (err) =>
                   err ? rej(err) : res()
                 );
               });
-              pCtx.logger.info("RequestsPlugin: rejected.", { threadID: entry.threadID, name: entry.name, by: ctx.user.id });
-              await ctx.reply(`${HEADER}\n\n🗑 تم رفض وحذف القروب:\n📛 ${entry.name}`);
-            } catch {
+              done = true;
+            } catch { /* try fallback */ }
+
+            if (!done) {
               try {
                 const botId = api.getCurrentUserID();
                 await new Promise<void>((res, rej) => {
@@ -254,16 +290,25 @@ class RequestsPlugin implements IPlugin {
                     err ? rej(err) : res()
                   );
                 });
-                await ctx.reply(`${HEADER}\n\n🗑 تم مغادرة القروب:\n📛 ${entry.name}`);
-              } catch (err2) {
-                await ctx.reply(`❌ تعذّر الحذف.\n${err2 instanceof Error ? err2.message : String(err2)}`);
-              }
+                done = true;
+              } catch { /* ignore */ }
+            }
+
+            if (done) {
+              pCtx.logger.info("RequestsPlugin: rejected/left.", {
+                threadID: entry.threadID, name: entry.name, by: ctx.user.id,
+              });
+              await ctx.reply(
+                `${HEADER}\n\n🗑 تم رفض/حذف القروب:\n📛 ${entry.name}`
+              );
+            } else {
+              await ctx.reply(`❌ تعذّر حذف القروب: ${entry.name}`);
             }
           }
           return;
         }
 
-        // ── Unknown sub-command ─────────────────────────────────────────
+        // ── Unknown sub-command ───────────────────────────────────────────
         await ctx.reply(
           `⚠️ أمر غير معروف: «${sub}»\n\n` +
           "📌 الأوامر المتاحة:\n" +
@@ -275,7 +320,7 @@ class RequestsPlugin implements IPlugin {
     };
 
     pCtx.registerCommand(cmd);
-    pCtx.logger.info(`RequestsPlugin enabled. Command "طلبات" registered.`);
+    pCtx.logger.info(`RequestsPlugin v1.1 enabled. Command "طلبات" registered.`);
   }
 
   async onDisable(): Promise<void> { this.ctx.logger.info("RequestsPlugin disabled."); }
