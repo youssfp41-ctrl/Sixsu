@@ -31,7 +31,7 @@ const uptimeCommand: ICommand = {
   aliases:     ["uptime", "stats", "حالة"],
   description: "يعرض معلومات تشغيل البوت الحالية",
   usage:       "ابتيم",
-  category:    "util",
+  category:    "system",
   adminOnly:   false,
   hidden:      false,
 
