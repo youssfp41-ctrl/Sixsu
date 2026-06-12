@@ -58,8 +58,9 @@ export function createPermissionsMiddleware(opts: PermissionsOptions): IMiddlewa
 
         if (!isAdmin) {
           log.warn(
-            `Permissions: user ${userId} tried admin-only command "${command.name}" — ignored silently.`
+            `Permissions: user ${userId} tried admin-only command "${command.name}" — denied.`
           );
+          await ctx.reply(denyMsg);
           return;
         }
       }
