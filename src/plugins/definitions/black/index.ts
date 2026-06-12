@@ -191,7 +191,12 @@ class BlackPlugin implements IPlugin {
   private async saveAll(caller: string): Promise<void> {
     if (this.repo) {
       const promises = Object.keys(this.store.threads).map((threadId) =>
-        this.repo!.upsert(threadId, this.store.threads[threadId]!).catch((err: unknown) => {
+        this.repo!.upsert(threadId, {
+          ...this.store.threads[threadId]!,
+          lastSentAt: this.store.threads[threadId]!.lastSentAt
+            ? new Date(this.store.threads[threadId]!.lastSentAt)
+            : null,
+        }).catch((err: unknown) => {
           this.ctx.logger.warn(`BlackPlugin.${caller}: MongoDB save failed for thread.`, {
             threadId,
             error: err instanceof Error ? err.message : String(err),
@@ -560,3 +565,4 @@ class BlackPlugin implements IPlugin {
 }
 
 export default new BlackPlugin();
+
