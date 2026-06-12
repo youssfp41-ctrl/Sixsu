@@ -152,7 +152,7 @@ class LockdownPlugin implements IPlugin {
       aliases:     ["lockdown", "lock"],
       description: "تفعيل أو تعطيل وضع الإغلاق لغير الأدمن في القروب",
       usage:       "اغلاق [تشغيل|ايقاف|حالة]",
-      category:    "moderation",
+      category:    "admin",
       adminOnly:   true,
       hidden:      false,
 
