@@ -185,7 +185,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ─── Shared utilities ─────────────────────────────────────────────────────────
 
-const HEADER = "⌯𝐕̸̶ֽׁ݊͐͢𝚵̶̱̩֗̀𝚾̣҉̶𝕰̶̟̀𝐋͜ 𝐈𝐃𝐀𝐑𝐀🪽↴";
+const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
 
 function getApi(pCtx: IPluginContext): IFcaManagement | null {
   const primary = pCtx.consumeService<IMiraiService>("mirai-transport")?.getApi?.() ?? null;
