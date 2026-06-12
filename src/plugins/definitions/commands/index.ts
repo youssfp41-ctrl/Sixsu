@@ -1,8 +1,8 @@
-import { config }                                      from "../../../config/env";
 import { IPlugin, PluginManifest }                    from "../../types/IPlugin";
 import { IPluginContext }                              from "../../types/IPluginContext";
 import { ICommand }                                   from "../../../commands/types/ICommand";
 import { Context }                                    from "../../../context/Context";
+import { prefixStore }                               from "../../../prefix/PrefixStore";
 import {
   buildCommandsMessage,
   buildCategoryMessage,
@@ -24,7 +24,7 @@ function makeCommand(_pCtx: IPluginContext): ICommand {
     async execute(ctx: Context): Promise<void> {
       await ctx.typingOn();
 
-      const prefix  = config.bot.prefix || "/";
+      const prefix  = prefixStore.get();
       const filter  = ctx.args[0]?.trim();
 
       // ── Category filter ─────────────────────────────────────────────────
