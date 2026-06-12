@@ -40,7 +40,7 @@ class BadeiaPlugin implements IPlugin {
       aliases:     ["prefix", "badeia"],
       description: "عرض البادئة الحالية أو تغييرها (للمالك فقط): بادئة [رمز]",
       usage:       "بادئة | بادئة [رمز]",
-      category:    "util",
+      category:    "system",
       adminOnly:   false,
       hidden:      false,
 
