@@ -83,7 +83,6 @@ function loadFromFile(): ProtectionStore {
     if (fs.existsSync(DATA_PATH)) {
       const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as ProtectionStore;
       if (!raw.botNicknames) raw.botNicknames = {};
-      // Always reset lastChangedBy on startup — it is a transient flag
       for (const threadId of Object.keys(raw.threads ?? {})) {
         if (raw.threads[threadId]) {
           raw.threads[threadId]!.lastChangedBy = '';
@@ -105,11 +104,6 @@ function persistToFile(data: ProtectionStore): void {
 
 // ─── Persistent save ──────────────────────────────────────────────────────────
 
-/**
- * Persist a single thread's state change.
- * Tries MongoDB first (fire-and-forget). Falls back to file only if no repo.
- * NOTE: lastChangedBy is transient and is NOT persisted to DB or file.
- */
 function saveThreadState(
   store:     ProtectionStore,
   threadId:  string,
@@ -118,8 +112,8 @@ function saveThreadState(
 ): void {
   setProtectionStore(store);
 
-  const state    = store.threads[threadId];
-  const botNick  = store.botNicknames[threadId] ?? "";
+  const state   = store.threads[threadId];
+  const botNick = store.botNicknames[threadId] ?? "";
 
   if (repo && state) {
     repo.upsert(threadId, {
@@ -140,9 +134,6 @@ function saveThreadState(
   }
 }
 
-/**
- * Persist all threads (called on plugin disable/unload as a safety flush).
- */
 function flushAllToFile(store: ProtectionStore): void {
   persistToFile(store);
 }
@@ -202,11 +193,6 @@ function getApi(pCtx: IPluginContext): IFcaManagement | null {
   return pCtx.consumeService<IMiraiService>("mirai-transport-secondary")?.getApi?.() ?? null;
 }
 
-/**
- * assertGroupAdmin — verifies the caller is either:
- *   (a) a Facebook group admin in this thread, OR
- *   (b) a bot admin (ctx.hasRole("admin") — includes AdminStore override)
- */
 async function assertGroupAdmin(
   ctx:  Context,
   api:  IFcaManagement,
@@ -243,20 +229,18 @@ async function showHelp(ctx: Context): Promise<void> {
   const prefix = prefixStore.get();
   await ctx.reply([
     HEADER, "",
-    `⌯ اسم قروب — تغيير اسم القروب (يحدّث الاسم المحمي تلقائياً)`,
+    `⌯ اسم قروب — تغيير اسم القروب مع تفعيل الحماية تلقائياً`,
     `  ↳ ${prefix}اسم [الاسم الجديد]`, "",
-    `⌯ حماية تشغيل — تفعيل حماية اسم القروب من التغيير الخارجي`,
-    `  ↳ ${prefix}حماية تشغيل`, "",
-    `⌯ حماية اغلاق — إيقاف حماية الاسم (بدون تغيير الاسم الحالي)`,
+    `⌯ حماية اغلاق — إيقاف حماية الاسم`,
     `  ↳ ${prefix}حماية اغلاق`, "",
-    `⌯ اسم بوت — تغيير اسم البوت في القروب (للأدمن فقط)`,
+    `⌯ حماية تشغيل — إعادة تفعيل حماية الاسم`,
+    `  ↳ ${prefix}حماية تشغيل`, "",
+    `⌯ اسم بوت — تغيير اسم البوت في القروب`,
     `  ↳ ${prefix}بوت [الاسم]`, "",
     `⌯ كنية — تعيين كنية لجميع الأعضاء`,
     `  ↳ ${prefix}كنية [الكنية]`, "",
     `⌯ حماية كنيات — تفعيل/إيقاف حماية كنيات الأعضاء`,
-    `  ↳ ${prefix}حماية كنيات`, "",
-    `⌯ بادئة — عرض البادئة الحالية`,
-    `  ↳ ${prefix}بادئة`,
+    `  ↳ ${prefix}حماية كنيات`,
   ].join("\n"));
 }
 
@@ -265,11 +249,11 @@ async function showHelp(ctx: Context): Promise<void> {
 /**
  * /اسم [اسم جديد]
  *
- * Changes the group name and:
- *  - Updates lockedName in the protection store so protection stays in sync.
- *  - Sets lastChangedBy = 'bot' BEFORE calling setTitle so handleNameChanged
- *    knows this event was bot-initiated and skips the revert logic.
- *  - Persists the new lockedName to MongoDB / file.
+ * - يغير اسم القروب إلى الاسم الجديد
+ * - يُفعّل الحماية تلقائياً على الاسم الجديد (protectName = true)
+ * - يحفظ الاسم الجديد كاسم محمي (lockedName = newName)
+ * - يضع lastChangedBy = 'bot' قبل setTitle لمنع handleNameChanged من عكس التغيير
+ * - أي تغيير خارجي بعدها يُعاد تلقائياً للاسم الجديد
  */
 async function handleGroupName(
   ctx:   Context,
@@ -286,39 +270,39 @@ async function handleGroupName(
 
   const newName = ctx.args.slice(0).join(" ").trim();
   if (!newName) {
-    await ctx.reply("⚠️ الرجاء إدخال الاسم الجديد.\n مثال: /اسم اسم القروب الجديد");
+    await ctx.reply("⚠️ الرجاء إدخال الاسم الجديد.\nمثال: /اسم اسم القروب الجديد");
     return;
   }
 
-  // ── Mark as bot-initiated BEFORE calling setTitle ──────────────────────
-  // This prevents handleNameChanged from reverting this change when the
-  // FCA event fires. lockedName is also updated so protection stays in sync.
   const threadState = getThreadState(store, ctx.thread.id);
-  threadState.lastChangedBy = 'bot';
-  threadState.lockedName    = newName;
+
+  // ── Set flags BEFORE calling setTitle to prevent revert loop ──────────
+  threadState.lastChangedBy = 'bot';   // tells handleNameChanged: skip revert
+  threadState.lockedName    = newName; // new protected reference
+  threadState.protectName   = true;    // auto-enable protection
   setProtectionStore(store);
 
   try {
     await fcaSetTitle(api, newName, ctx.thread.id);
 
-    // Persist updated lockedName to MongoDB / file
     saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-    pCtx.logger.info("Group name changed and lockedName updated.", {
+    pCtx.logger.info("Group name changed, protection auto-enabled.", {
       threadID: ctx.thread.id,
       by:       ctx.user.id,
       newName,
-      protectName: threadState.protectName,
     });
 
-    const protectionStatus = threadState.protectName
-      ? `\n🔒 الحماية مفعّلة — الاسم الجديد هو الاسم المحمي.`
-      : `\n🔓 الحماية مُعطَّلة — يمكن تفعيلها بـ: /حماية تشغيل`;
-
-    await ctx.reply(`${HEADER}\n\n✅ تم تغيير اسم القروب إلى:\n"${newName}"${protectionStatus}`);
+    await ctx.reply(
+      `${HEADER}\n\n` +
+      `✅ تم تغيير اسم القروب إلى:\n"${newName}"\n\n` +
+      `🔒 تم تفعيل الحماية تلقائياً ضد التغيير الخارجي.`
+    );
   } catch (err) {
-    // Revert the flag on failure so no stale 'bot' flag remains
+    // Revert flags on failure — don't leave stale state
     threadState.lastChangedBy = 'external';
+    threadState.protectName   = false;
+    threadState.lockedName    = "";
     pCtx.logger.warn("setTitle failed.", { error: String(err) });
     await ctx.reply("⚠️ فشل تغيير اسم القروب. تأكد أن البوت أدمن في القروب.");
   }
@@ -392,7 +376,7 @@ async function handleSetNickname(
 
   const nick = ctx.args.slice(0).join(" ").trim();
   if (!nick) {
-    await ctx.reply("⚠️ الرجاء إدخال الكنية.\n مثال: /كنية كنية");
+    await ctx.reply("⚠️ الرجاء إدخال الكنية.\nمثال: /كنية كنية");
     return;
   }
 
@@ -452,7 +436,6 @@ async function handleProtection(
   } else if (target === "اغلاق" || target === "إغلاق") {
     await handleProtectNameDisable(ctx, pCtx, store, repo);
   } else if (target === "اسم") {
-    // Legacy toggle — kept for backward compatibility
     await handleProtectNameToggle(ctx, pCtx, store, repo);
   } else if (target === "كنيات") {
     await handleProtectNicknames(ctx, pCtx, store, repo);
@@ -460,19 +443,15 @@ async function handleProtection(
     const prefix = prefixStore.get();
     await ctx.reply(
       `${HEADER}\n\n⚠️ حدد نوع الحماية:\n` +
-      `⌯ ${prefix}حماية تشغيل — تفعيل حماية اسم القروب\n` +
       `⌯ ${prefix}حماية اغلاق — إيقاف حماية الاسم\n` +
+      `⌯ ${prefix}حماية تشغيل — إعادة تفعيل حماية الاسم\n` +
       `⌯ ${prefix}حماية كنيات — تفعيل/إيقاف حماية الكنيات`
     );
   }
 }
 
 /**
- * /حماية تشغيل
- *
- * Enables name protection without changing the current name.
- * Uses the stored lockedName as the reference.
- * If no lockedName is set yet, fetches the current group name as the reference.
+ * /حماية تشغيل — يعيد تفعيل الحماية على الاسم المحمي المحفوظ
  */
 async function handleProtectNameEnable(
   ctx:   Context,
@@ -488,40 +467,29 @@ async function handleProtectNameEnable(
 
   const threadState = getThreadState(store, ctx.thread.id);
 
-  // If no protected name is set yet, use the current group name
   if (!threadState.lockedName) {
     threadState.lockedName = info.name;
   }
 
   if (threadState.protectName) {
-    await ctx.reply(
-      `${HEADER}\n\n🔒 الحماية مفعّلة بالفعل.\n⌯ الاسم المحمي: "${threadState.lockedName}"`
-    );
+    await ctx.reply(`${HEADER}\n\n🔒 الحماية مفعّلة بالفعل.\n⌯ الاسم المحمي: "${threadState.lockedName}"`);
     return;
   }
 
   threadState.protectName = true;
   saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-  pCtx.logger.info("Name protection enabled.", {
-    threadID:    ctx.thread.id,
-    lockedName:  threadState.lockedName,
-  });
+  pCtx.logger.info("Name protection enabled.", { threadID: ctx.thread.id, lockedName: threadState.lockedName });
 
   await ctx.reply(
     `${HEADER}\n\n🔒 تم تفعيل حماية اسم القروب.\n` +
     `⌯ الاسم المحمي: "${threadState.lockedName}"\n` +
-    `⌯ أي تغيير خارجي سيُعاد تلقائياً.\n` +
-    `⌯ تغيير الاسم عبر /اسم مسموح دائماً.`
+    `⌯ أي تغيير خارجي سيُعاد تلقائياً.`
   );
 }
 
 /**
- * /حماية اغلاق
- *
- * Disables name protection only.
- * Does NOT change the current name, does NOT reset lockedName.
- * The lockedName is preserved so /حماية تشغيل can re-enable with the same reference.
+ * /حماية اغلاق — يوقف الحماية فقط بدون تغيير الاسم أو مسح الاسم المحمي
  */
 async function handleProtectNameDisable(
   ctx:   Context,
@@ -539,35 +507,27 @@ async function handleProtectNameDisable(
 
   if (!threadState.protectName) {
     await ctx.reply(
-      `${HEADER}\n\n🔓 الحماية مُعطَّلة بالفعل.\n` +
-      (threadState.lockedName ? `⌯ الاسم المحمي المحفوظ: "${threadState.lockedName}"` : "")
+      `${HEADER}\n\n🔓 الحماية مُعطَّلة بالفعل.` +
+      (threadState.lockedName ? `\n⌯ الاسم المحمي المحفوظ: "${threadState.lockedName}"` : "")
     );
     return;
   }
 
   threadState.protectName = false;
-  // NOTE: lockedName is intentionally kept — re-enabling protection reuses it
   saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-  pCtx.logger.info("Name protection disabled.", {
-    threadID:   ctx.thread.id,
-    lockedName: threadState.lockedName,
-  });
+  pCtx.logger.info("Name protection disabled.", { threadID: ctx.thread.id });
 
   await ctx.reply(
     `${HEADER}\n\n🔓 تم إيقاف حماية اسم القروب.\n` +
-    `⌯ الاسم الحالي لن يُحمى من التغيير الخارجي.\n` +
     (threadState.lockedName
-      ? `⌯ الاسم المحمي المحفوظ: "${threadState.lockedName}" — لإعادة التفعيل: /حماية تشغيل`
+      ? `⌯ الاسم المحمي المحفوظ: "${threadState.lockedName}"\n⌯ لإعادة التفعيل: /حماية تشغيل`
       : "")
   );
 }
 
 /**
- * /حماية اسم  (legacy toggle — kept for backward compatibility)
- *
- * Toggles name protection on/off.
- * When enabling, locks to the current group name fetched from the API.
+ * /حماية اسم — toggle للتوافق مع الإصدارات السابقة
  */
 async function handleProtectNameToggle(
   ctx:   Context,
@@ -587,13 +547,13 @@ async function handleProtectNameToggle(
     threadState.protectName = true;
     threadState.lockedName  = info.name;
     saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
-    pCtx.logger.info("Name protection enabled (toggle).", { threadID: ctx.thread.id, lockedName: info.name });
+    pCtx.logger.info("Name protection toggled on.", { threadID: ctx.thread.id, lockedName: info.name });
     await ctx.reply(`${HEADER}\n\n🔒 تم تفعيل حماية اسم القروب.\n⌯ الاسم المحمي: "${info.name}"`);
   } else {
     threadState.protectName = false;
     threadState.lockedName  = "";
     saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
-    pCtx.logger.info("Name protection disabled (toggle).", { threadID: ctx.thread.id });
+    pCtx.logger.info("Name protection toggled off.", { threadID: ctx.thread.id });
     await ctx.reply(`${HEADER}\n\n🔓 تم إيقاف حماية اسم القروب.`);
   }
 }
@@ -686,7 +646,7 @@ async function handleClearNicknames(
   pCtx.logger.info("All nicknames cleared.", { threadID: ctx.thread.id, ok, failed });
 
   const lines = [HEADER, "", "✅ تم مسح جميع الكنيات", `⌯ نجح: ${ok} عضو`];
-  if (failed > 0)                lines.push(`⌯ فشل: ${failed} عضو`);
+  if (failed > 0)               lines.push(`⌯ فشل: ${failed} عضو`);
   if (botNick && clearBotRestoreOk)  lines.push(`⌯ اسم البوت محمي: "${botNick}"`);
   if (botNick && !clearBotRestoreOk) lines.push(`⚠️ تعذّر استعادة اسم البوت — أعد تعيينه: بوت ${botNick}`);
   await ctx.reply(lines.join("\n"));
@@ -697,8 +657,8 @@ async function handleClearNicknames(
 class ManagementPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "management",
-    version:     "6.0.0",
-    description: "إدارة أسماء القروب وكنيات الأعضاء مع حماية ذكية. دعم MongoDB + تتبع مصدر التغيير.",
+    version:     "7.0.0",
+    description: "إدارة أسماء القروب — حماية تلقائية فور تغيير الاسم عبر /اسم. دعم MongoDB.",
     author:      "Sixseven-6677",
   };
 
@@ -719,7 +679,7 @@ class ManagementPlugin implements IPlugin {
             lockedName:       d.lockedName,
             protectNicknames: d.protectNicknames,
             nicknames:        d.nicknames,
-            lastChangedBy:    '', // always reset — transient flag, not persisted
+            lastChangedBy:    '', // transient — always reset on startup
           };
           if (d.botNickname) {
             this.store.botNicknames[d.threadId] = d.botNickname;
@@ -753,14 +713,14 @@ class ManagementPlugin implements IPlugin {
 
     const cmdName: ICommand = {
       name: "اسم", aliases: ["name", "groupname"],
-      description: "تغيير اسم القروب وتحديث الاسم المحمي", usage: "اسم [الاسم الجديد]",
+      description: "تغيير اسم القروب مع تفعيل الحماية تلقائياً", usage: "اسم [الاسم الجديد]",
       category: "util", adminOnly: false, hidden: true,
       async execute(ctx) { await handleGroupName(ctx, pCtx, store, repo); },
     };
 
     const cmdBot: ICommand = {
       name: "بوت", aliases: ["botnick", "botname"],
-      description: "تغيير اسم البوت في القروب (للمالك فقط)", usage: "بوت [الاسم]",
+      description: "تغيير اسم البوت في القروب", usage: "بوت [الاسم]",
       category: "util", adminOnly: false, hidden: true,
       async execute(ctx) { await handleBotName(ctx, pCtx, store, repo); },
     };
@@ -774,7 +734,7 @@ class ManagementPlugin implements IPlugin {
 
     const cmdProtect: ICommand = {
       name: "حماية", aliases: ["protect", "protection"],
-      description: "تشغيل/إيقاف حماية اسم القروب أو الكنيات", usage: "حماية [تشغيل|اغلاق|كنيات]",
+      description: "تشغيل/إيقاف حماية الاسم أو الكنيات", usage: "حماية [تشغيل|اغلاق|كنيات]",
       category: "util", adminOnly: false, hidden: true,
       async execute(ctx) { await handleProtection(ctx, pCtx, store, repo); },
     };
@@ -799,7 +759,7 @@ class ManagementPlugin implements IPlugin {
     }
 
     pCtx.logger.info(
-      "ManagementPlugin v6 enabled — smart name protection with bot-source tracking. " +
+      "ManagementPlugin v7 enabled — /اسم auto-enables protection. " +
       `Storage: ${this.repo ? "MongoDB" : "file"}.`
     );
   }
