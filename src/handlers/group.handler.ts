@@ -18,6 +18,11 @@ interface IFcaProtectionApi {
     threadID:  string,
     callback:  (err: Error | null) => void,
   ): void;
+  sendMessage(
+    msg:      string | { body: string },
+    threadID: string,
+    callback?: (err: Error | null, info: unknown) => void,
+  ): void;
   changeNickname(
     nickname:      string,
     threadID:      string,
@@ -115,12 +120,6 @@ async function notifyAdminBotAdded(
 
 // ── Public handlers ────────────────────────────────────────────────────────
 
-/**
- * @param event           Member-joined event from any account's MQTT stream.
- * @param senderOverride  Account-specific sender. When omitted, falls back to the global
- *                        primary sender. Always pass the per-account sender from
- *                        bootFcaAccount() so the reply is sent through the correct account.
- */
 export async function handleMemberJoined(
   event:          FBMemberJoinedEvent,
   senderOverride?: ISender,
@@ -161,12 +160,6 @@ export async function handleMemberJoined(
   await sender.sendText(event.senderId, text);
 }
 
-/**
- * @param event           Member-left event from any account's MQTT stream.
- * @param senderOverride  Account-specific sender. When omitted, falls back to the global
- *                        primary sender. Always pass the per-account sender from
- *                        bootFcaAccount() so the reply is sent through the correct account.
- */
 export async function handleMemberLeft(
   event:          FBMemberLeftEvent,
   senderOverride?: ISender,
@@ -195,12 +188,12 @@ export async function handleMemberLeft(
 /**
  * Handles the FCA name-changed event.
  *
- * Logic:
- *  1. If protection is off → ignore.
- *  2. If the new name already equals the locked name → no-op.
- *  3. If `lastChangedBy === 'bot'` → the change came from /اسم command.
- *     Consume the flag and skip revert to prevent bot-induced loops.
- *  4. Otherwise → external change while protection is on → revert.
+ * Strategy (angel-bot approach):
+ *  1. If protection is off or no locked name → ignore.
+ *  2. If new name already equals locked name → no-op.
+ *  3. Check event.changedBy against api.getCurrentUserID().
+ *     If bot itself made the change → skip revert (zero loop risk, survives restarts).
+ *  4. Otherwise (external change) → wait 1s then revert + notify.
  */
 export async function handleNameChanged(event: FBNameChangedEvent): Promise<void> {
   const store = getProtectionStore();
@@ -209,19 +202,6 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
   if (!state?.protectName || !state.lockedName) return;
   if (event.newName === state.lockedName) return;
 
-  // ── Bot-initiated change — skip revert to avoid loop ──────────────────
-  if (state.lastChangedBy === 'bot') {
-    log.info("GroupHandler: name_changed was bot-initiated (/اسم) — skipping revert.", {
-      threadId:  event.threadId,
-      newName:   event.newName,
-      lockedName: state.lockedName,
-    });
-    // Reset flag so subsequent external changes are handled normally
-    state.lastChangedBy = 'external';
-    return;
-  }
-
-  // ── External change while protection is active — revert ───────────────
   const api = getFcaApi();
   if (!api) {
     log.warn("GroupHandler: name_changed — protection active but FCA API unavailable.", {
@@ -230,15 +210,34 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
     return;
   }
 
-  log.warn("GroupHandler: name_changed — external change detected, reverting to locked name.", {
+  const botId = api.getCurrentUserID();
+
+  // ── Bot-initiated change — skip revert to avoid loop ──────────────────
+  // Uses event.changedBy (like angel-bot) — reliable, no in-memory flags,
+  // survives restarts, no race conditions.
+  if (String(event.changedBy) === String(botId)) {
+    log.info("GroupHandler: name_changed was bot-initiated — skipping revert.", {
+      threadId:  event.threadId,
+      newName:   event.newName,
+      lockedName: state.lockedName,
+    });
+    return;
+  }
+
+  // ── External change while protection is active — revert ───────────────
+  log.warn("GroupHandler: name_changed — external change detected, reverting.", {
     threadId:   event.threadId,
     unwanted:   event.newName,
     lockedName: state.lockedName,
     changedBy:  event.changedBy,
   });
 
+  // 1s delay before reverting (angel-bot pattern — avoids FB API rate issues)
+  await new Promise<void>((r) => setTimeout(r, 1000));
+
+  const lockedName = state.lockedName; // capture before async gap
   await new Promise<void>((resolve) => {
-    api.setTitle(state.lockedName, event.threadId, (err) => {
+    api.setTitle(lockedName, event.threadId, (err) => {
       if (err) {
         log.warn("GroupHandler: name revert failed.", {
           threadId: event.threadId,
@@ -247,8 +246,15 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
       } else {
         log.info("GroupHandler: name reverted successfully.", {
           threadId:   event.threadId,
-          lockedName: state.lockedName,
+          lockedName,
         });
+        // Notify the group (angel-bot style)
+        try {
+          api.sendMessage(
+            `🛡 تم استعادة اسم القروب المحمي:\n"${lockedName}"`,
+            event.threadId,
+          );
+        } catch { /* best-effort */ }
       }
       resolve();
     });
@@ -274,12 +280,17 @@ export async function handleNicknameChanged(event: FBNicknameChangedEvent): Prom
     if (!protectedNick) return;
     if (event.newNickname === protectedNick) return;
 
+    // Skip if bot made the change itself
+    if (String(event.changedBy) === String(botId)) return;
+
     log.warn("GroupHandler: bot nickname changed — restoring protected nick.", {
       threadId:      event.threadId,
       unwanted:      event.newNickname || "(cleared)",
       protectedNick,
       changedBy:     event.changedBy,
     });
+
+    await new Promise<void>((r) => setTimeout(r, 1000));
 
     await new Promise<void>((resolve) => {
       api.changeNickname(protectedNick, event.threadId, botId, (err) => {
@@ -308,6 +319,9 @@ export async function handleNicknameChanged(event: FBNicknameChangedEvent): Prom
   if (!expected) return;
   if (event.newNickname === expected) return;
 
+  // Skip if bot made the nickname change itself
+  if (String(event.changedBy) === String(botId)) return;
+
   log.info("GroupHandler: member nickname changed — restoring.", {
     threadId:    event.threadId,
     uid:         event.participantId,
@@ -315,6 +329,8 @@ export async function handleNicknameChanged(event: FBNicknameChangedEvent): Prom
     expected,
     changedBy:   event.changedBy,
   });
+
+  await new Promise<void>((r) => setTimeout(r, 1000));
 
   await new Promise<void>((resolve) => {
     api.changeNickname(expected, event.threadId, event.participantId, (err) => {
