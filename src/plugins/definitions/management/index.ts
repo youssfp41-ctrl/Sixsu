@@ -83,11 +83,6 @@ function loadFromFile(): ProtectionStore {
     if (fs.existsSync(DATA_PATH)) {
       const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8")) as ProtectionStore;
       if (!raw.botNicknames) raw.botNicknames = {};
-      for (const threadId of Object.keys(raw.threads ?? {})) {
-        if (raw.threads[threadId]) {
-          raw.threads[threadId]!.lastChangedBy = '';
-        }
-      }
       return raw;
     }
   } catch { /* corrupt — start fresh */ }
@@ -147,7 +142,6 @@ function getThreadState(data: ProtectionStore, threadID: string): ThreadState {
       lockedName:       "",
       protectNicknames: false,
       nicknames:        {},
-      lastChangedBy:    '',
     };
   }
   return data.threads[threadID]!;
@@ -275,11 +269,10 @@ async function handleGroupName(
   }
 
   const threadState = getThreadState(store, ctx.thread.id);
-
-  // ── Set flags BEFORE calling setTitle to prevent revert loop ──────────
-  threadState.lastChangedBy = 'bot';   // tells handleNameChanged: skip revert
+  // ── Enable protection BEFORE setTitle ────────────────────────────────
   threadState.lockedName    = newName; // new protected reference
   threadState.protectName   = true;    // auto-enable protection
+  setProtectionStore(store);
   setProtectionStore(store);
 
   try {
@@ -299,9 +292,7 @@ async function handleGroupName(
       `🔒 تم تفعيل الحماية تلقائياً ضد التغيير الخارجي.`
     );
   } catch (err) {
-    // Revert flags on failure — don't leave stale state
-    threadState.lastChangedBy = 'external';
-    threadState.protectName   = false;
+    // Revert flags on failure — don't leave stale state    threadState.protectName   = false;
     threadState.lockedName    = "";
     pCtx.logger.warn("setTitle failed.", { error: String(err) });
     await ctx.reply("⚠️ فشل تغيير اسم القروب. تأكد أن البوت أدمن في القروب.");
@@ -678,8 +669,7 @@ class ManagementPlugin implements IPlugin {
             protectName:      d.protectName,
             lockedName:       d.lockedName,
             protectNicknames: d.protectNicknames,
-            nicknames:        d.nicknames,
-            lastChangedBy:    '', // transient — always reset on startup
+            nicknames:        d.nicknames // transient — always reset on startup
           };
           if (d.botNickname) {
             this.store.botNicknames[d.threadId] = d.botNickname;
