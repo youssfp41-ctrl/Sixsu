@@ -8,9 +8,14 @@ import { ICommand }                from "../../../commands/types/ICommand";
 import { Context }                 from "../../../context/Context";
 import {
   setProtectionStore,
+  getProtectionSummary,
   ThreadState,
   ProtectionStore,
 } from "../../../protection/ProtectionRegistry";
+import {
+  logProtectionEnabled,
+  logProtectionDisabled,
+} from "../../../handlers/group.handler";
 
 // ─── Extended FCA types ──────────────────────────────────────────────────────
 
@@ -50,6 +55,7 @@ interface IFcaManagement {
 
 interface IMiraiService {
   getApi(): IFcaManagement | null;
+  isConnected(): boolean;
 }
 
 // ─── GroupSettings repository interface (loose coupling) ─────────────────────
@@ -131,6 +137,62 @@ function saveThreadState(
 
 function flushAllToFile(store: ProtectionStore): void {
   persistToFile(store);
+}
+
+// ─── MongoDB load with retry ───────────────────────────────────────────────────
+
+/**
+ * Attempts to load protection state from MongoDB with retries.
+ * On Railway, MongoDB may not be immediately available on startup — retrying
+ * ensures we don't fall back to an empty file-based state unnecessarily.
+ */
+async function loadFromMongoWithRetry(
+  repo: IGroupSettingsRepository,
+  log:  { info(m: string, o?: object): void; warn(m: string, o?: object): void },
+  maxAttempts = 3,
+  retryDelayMs = 2_000,
+): Promise<ProtectionStore | null> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const docs  = await repo.findAll();
+      const store: ProtectionStore = { threads: {}, botNicknames: {} };
+
+      for (const d of docs) {
+        store.threads[d.threadId] = {
+          protectName:      d.protectName,
+          lockedName:       d.lockedName,
+          protectNicknames: d.protectNicknames,
+          nicknames:        d.nicknames,
+        };
+        if (d.botNickname) {
+          store.botNicknames[d.threadId] = d.botNickname;
+        }
+      }
+
+      log.info("ManagementPlugin: protection state loaded from MongoDB.", {
+        attempt,
+        savedThreads:   Object.keys(store.threads).length,
+        protectedNames: Object.values(store.threads).filter(s => s.protectName).length,
+        protectedBots:  Object.keys(store.botNicknames).length,
+      });
+      return store;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < maxAttempts) {
+        log.warn(
+          `ManagementPlugin: MongoDB load failed (attempt ${attempt}/${maxAttempts}) — retrying in ${retryDelayMs}ms.`,
+          { error: msg },
+        );
+        await new Promise<void>((r) => setTimeout(r, retryDelayMs));
+      } else {
+        log.warn(
+          `ManagementPlugin: MongoDB load failed after ${maxAttempts} attempts — falling back to file.`,
+          { error: msg },
+        );
+      }
+    }
+  }
+  return null;
 }
 
 // ─── Thread state helpers ─────────────────────────────────────────────────────
@@ -279,7 +341,8 @@ async function handleGroupName(
 
     saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-    pCtx.logger.info("Group name changed, protection auto-enabled.", {
+    logProtectionEnabled(ctx.thread.id, newName, ctx.user.id);
+    pCtx.logger.info("Group name changed, protection auto-enabled. [protection-active]", {
       threadID: ctx.thread.id,
       by:       ctx.user.id,
       newName,
@@ -470,7 +533,11 @@ async function handleProtectNameEnable(
   threadState.protectName = true;
   saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-  pCtx.logger.info("Name protection enabled.", { threadID: ctx.thread.id, lockedName: threadState.lockedName });
+  logProtectionEnabled(ctx.thread.id, threadState.lockedName, ctx.user.id);
+  pCtx.logger.info("Name protection enabled. [protection-active]", {
+    threadID:   ctx.thread.id,
+    lockedName: threadState.lockedName,
+  });
 
   await ctx.reply(
     `${HEADER}\n\n🔒 تم تفعيل حماية اسم القروب.\n` +
@@ -507,7 +574,8 @@ async function handleProtectNameDisable(
   threadState.protectName = false;
   saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
 
-  pCtx.logger.info("Name protection disabled.", { threadID: ctx.thread.id });
+  logProtectionDisabled(ctx.thread.id, ctx.user.id);
+  pCtx.logger.info("Name protection disabled. [protection-inactive]", { threadID: ctx.thread.id });
 
   await ctx.reply(
     `${HEADER}\n\n🔓 تم إيقاف حماية اسم القروب.\n` +
@@ -538,13 +606,18 @@ async function handleProtectNameToggle(
     threadState.protectName = true;
     threadState.lockedName  = info.name;
     saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
-    pCtx.logger.info("Name protection toggled on.", { threadID: ctx.thread.id, lockedName: info.name });
+    logProtectionEnabled(ctx.thread.id, info.name, ctx.user.id);
+    pCtx.logger.info("Name protection toggled on. [protection-active]", {
+      threadID: ctx.thread.id,
+      lockedName: info.name,
+    });
     await ctx.reply(`${HEADER}\n\n🔒 تم تفعيل حماية اسم القروب.\n⌯ الاسم المحمي: "${info.name}"`);
   } else {
     threadState.protectName = false;
     threadState.lockedName  = "";
     saveThreadState(store, ctx.thread.id, repo, pCtx.logger);
-    pCtx.logger.info("Name protection toggled off.", { threadID: ctx.thread.id });
+    logProtectionDisabled(ctx.thread.id, ctx.user.id);
+    pCtx.logger.info("Name protection toggled off. [protection-inactive]", { threadID: ctx.thread.id });
     await ctx.reply(`${HEADER}\n\n🔓 تم إيقاف حماية اسم القروب.`);
   }
 }
@@ -609,6 +682,7 @@ async function handleClearNicknames(
   await ctx.reply(`⏳ جارٍ مسح الكنيات لـ ${participants.length} عضو...`);
 
   let ok = 0, failed = 0;
+
   for (const uid of participants) {
     try {
       await fcaChangeNickname(api, "", ctx.thread.id, uid);
@@ -621,6 +695,7 @@ async function handleClearNicknames(
   if (botId && botNick) {
     try {
       await fcaChangeNickname(api, botNick, ctx.thread.id, botId);
+      pCtx.logger.info("Bot nickname restored after clear-nicknames.", { threadID: ctx.thread.id, botNick });
     } catch (err) {
       clearBotRestoreOk = false;
       pCtx.logger.warn("Failed to restore bot nickname after clear-nicknames.", {
@@ -645,56 +720,66 @@ async function handleClearNicknames(
 
 // ─── Plugin class ─────────────────────────────────────────────────────────────
 
+/** Interval for the self-healing watchdog (every 5 minutes). */
+const WATCHDOG_INTERVAL_MS = 5 * 60_000;
+
 class ManagementPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "management",
-    version:     "7.0.0",
-    description: "إدارة أسماء القروب — حماية تلقائية فور تغيير الاسم عبر /اسم. دعم MongoDB.",
+    version:     "8.0.0",
+    description: "إدارة أسماء القروب — حماية تلقائية. Self-healing watchdog. MongoDB مع retry.",
     author:      "Sixseven-6677",
   };
 
-  private ctx!:  IPluginContext;
-  private store: ProtectionStore = { threads: {}, botNicknames: {} };
-  private repo:  IGroupSettingsRepository | null = null;
+  private ctx!:              IPluginContext;
+  private store:             ProtectionStore = { threads: {}, botNicknames: {} };
+  private repo:              IGroupSettingsRepository | null = null;
+  private watchdogTimer:     ReturnType<typeof setInterval> | null = null;
+  private lastConnectedState = false;
+
+  // ─── onLoad: load protection state from MongoDB (with retry) ──────────────
 
   async onLoad(ctx: IPluginContext): Promise<void> {
     this.ctx  = ctx;
     this.repo = ctx.consumeService<IGroupSettingsRepository>("group-settings-repo") ?? null;
 
     if (this.repo) {
-      try {
-        const docs = await this.repo.findAll();
-        for (const d of docs) {
-          this.store.threads[d.threadId] = {
-            protectName:      d.protectName,
-            lockedName:       d.lockedName,
-            protectNicknames: d.protectNicknames,
-            nicknames:        d.nicknames // transient — always reset on startup
-          };
-          if (d.botNickname) {
-            this.store.botNicknames[d.threadId] = d.botNickname;
-          }
-        }
-        ctx.logger.info("ManagementPlugin loaded — ProtectionRegistry initialised from MongoDB.", {
-          savedThreads:  Object.keys(this.store.threads).length,
-          protectedBots: Object.keys(this.store.botNicknames).length,
-        });
-      } catch (err) {
-        ctx.logger.warn("ManagementPlugin: MongoDB load failed — falling back to file.", {
-          error: err instanceof Error ? err.message : String(err),
-        });
+      const loaded = await loadFromMongoWithRetry(this.repo, ctx.logger);
+      if (loaded) {
+        this.store = loaded;
+      } else {
+        // MongoDB failed after retries — try file as last resort
         this.store = loadFromFile();
+        ctx.logger.warn(
+          "ManagementPlugin: using file fallback for protection state. " +
+          "On Railway this file is ephemeral — set MONGODB_URI for reliability.",
+          {
+            savedThreads: Object.keys(this.store.threads).length,
+          },
+        );
       }
     } else {
       this.store = loadFromFile();
-      ctx.logger.info("ManagementPlugin loaded — ProtectionRegistry initialised from file.", {
-        savedThreads:  Object.keys(this.store.threads).length,
-        protectedBots: Object.keys(this.store.botNicknames).length,
+      ctx.logger.info("ManagementPlugin: no MongoDB repo — loaded from file.", {
+        savedThreads: Object.keys(this.store.threads).length,
       });
     }
 
     setProtectionStore(this.store);
+
+    const summary = getProtectionSummary();
+    ctx.logger.info(
+      "ManagementPlugin loaded — ProtectionRegistry initialised. [protection-loaded]",
+      {
+        savedThreads:   summary.totalThreads,
+        protectedNames: summary.protectedNames,
+        protectedNicks: summary.protectedNicks,
+        storage:        this.repo ? "MongoDB" : "file",
+      },
+    );
   }
+
+  // ─── onEnable: register commands + start self-healing watchdog ────────────
 
   async onEnable(): Promise<void> {
     const pCtx  = this.ctx;
@@ -748,18 +833,125 @@ class ManagementPlugin implements IPlugin {
       pCtx.logger.info(`Command "${cmd.name}" registered (aliases: ${cmd.aliases?.join(", ")}).`);
     }
 
+    // ── Self-healing watchdog ──────────────────────────────────────────────
+    // Runs every 5 minutes and:
+    //   1. Logs the current protection summary so issues are visible in logs.
+    //   2. Detects transport reconnect (was disconnected, now connected) and
+    //      re-syncs the protection store from MongoDB to ensure state is current.
+    //   3. Detects permanent transport failure and warns loudly.
+    this.startWatchdog(pCtx);
+
     pCtx.logger.info(
-      "ManagementPlugin v7 enabled — /اسم auto-enables protection. " +
-      `Storage: ${this.repo ? "MongoDB" : "file"}.`
+      "ManagementPlugin v8 enabled. [watchdog-start] " +
+      `Storage: ${this.repo ? "MongoDB" : "file"}. ` +
+      `Watchdog interval: ${WATCHDOG_INTERVAL_MS / 1000}s.`,
     );
   }
 
+  // ─── Watchdog ──────────────────────────────────────────────────────────────
+
+  private startWatchdog(pCtx: IPluginContext): void {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+
+    this.watchdogTimer = setInterval(() => {
+      this.watchdogTick(pCtx).catch((err: unknown) => {
+        pCtx.logger.warn("ManagementPlugin: watchdog tick threw.", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  private async watchdogTick(pCtx: IPluginContext): Promise<void> {
+    const transport = pCtx.consumeService<IMiraiService>("mirai-transport");
+    const isConnected = transport?.isConnected() ?? false;
+
+    const summary = getProtectionSummary();
+
+    // ── Always log protection status ──────────────────────────────────────
+    pCtx.logger.info("ManagementPlugin: watchdog tick. [watchdog-tick]", {
+      transport:      isConnected ? "connected" : "disconnected",
+      protectedNames: summary.protectedNames,
+      protectedNicks: summary.protectedNicks,
+      totalThreads:   summary.totalThreads,
+      activeThreads:  summary.threads
+        .filter(t => t.protectName)
+        .map(t => ({
+          threadId:    t.threadId,
+          lockedName:  t.lockedName,
+          revertCount: t.revertCount,
+          enabledAt:   t.enabledAt,
+          lastRevertAt: t.lastRevertAt,
+          lastEventAt:  t.lastEventAt,
+        })),
+      timestamp: new Date().toISOString(),
+    });
+
+    // ── Detect reconnect: transport was down, now it's back ───────────────
+    if (!this.lastConnectedState && isConnected) {
+      pCtx.logger.info(
+        "ManagementPlugin: transport just reconnected — reloading protection state from MongoDB. [self-healing]",
+      );
+      await this.reloadFromMongo(pCtx);
+    }
+
+    // ── Warn if transport is down ─────────────────────────────────────────
+    if (!isConnected) {
+      pCtx.logger.warn(
+        "ManagementPlugin: transport is DISCONNECTED — name protection INACTIVE. [protection-warning]",
+        {
+          protectedNames: summary.protectedNames,
+          note: "Protection will resume automatically once transport reconnects.",
+          timestamp: new Date().toISOString(),
+        },
+      );
+    }
+
+    this.lastConnectedState = isConnected;
+  }
+
+  /** Reload protection state from MongoDB (called on reconnect). */
+  private async reloadFromMongo(pCtx: IPluginContext): Promise<void> {
+    if (!this.repo) {
+      pCtx.logger.info("ManagementPlugin: reloadFromMongo skipped — no repo available.");
+      return;
+    }
+
+    const loaded = await loadFromMongoWithRetry(this.repo, pCtx.logger, 2, 1_000);
+    if (loaded) {
+      this.store = loaded;
+      setProtectionStore(this.store);
+      const summary = getProtectionSummary();
+      pCtx.logger.info(
+        "ManagementPlugin: protection state reloaded from MongoDB after reconnect. [protection-reloaded]",
+        {
+          protectedNames: summary.protectedNames,
+          totalThreads:   summary.totalThreads,
+          timestamp:      new Date().toISOString(),
+        },
+      );
+    } else {
+      pCtx.logger.warn("ManagementPlugin: reloadFromMongo failed — keeping existing in-memory state.");
+    }
+  }
+
+  // ─── Lifecycle ─────────────────────────────────────────────────────────────
+
   async onDisable(): Promise<void> {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+      this.ctx.logger.info("ManagementPlugin: watchdog stopped. [watchdog-stop]");
+    }
     flushAllToFile(this.store);
     this.ctx.logger.info("ManagementPlugin disabled — state flushed to file.");
   }
 
   async onUnload(): Promise<void> {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     flushAllToFile(this.store);
     this.ctx.logger.info("ManagementPlugin unloaded.");
   }

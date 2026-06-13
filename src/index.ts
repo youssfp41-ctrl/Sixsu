@@ -380,6 +380,28 @@ async function bootstrap(): Promise<void> {
         await t.restart();
       }
     });
+
+    // Permanent failure hook: when MiraiTransport gives up (AppState expired or
+    // max retries exceeded), it signals here so ReconnectManager can decide whether
+    // to attempt a full credential refresh or log a critical alert.
+    // This prevents the silent zombie state where transport stops retrying but
+    // nothing in the outer system knows about it.
+    for (const { label, transport: t } of transports) {
+      t.setOnPermanentFailure((reason: string) => {
+        log.error(
+          `Transport [${label}]: permanent failure signalled — reason: ${reason}. ` +
+          `Triggering ReconnectManager forced reconnect. [permanent-failure]`,
+          { label, reason, stats: t.getStats() },
+        );
+        // Force an immediate reconnect attempt (bypasses the health-check interval delay).
+        // ReconnectManager.reconnect() respects guard limits so it won't spam Facebook.
+        reconnect.reconnect(label).catch((err: unknown) => {
+          log.error(`Forced reconnect after permanent failure threw for [${label}].`, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      });
+    }
   }
 
   if (!primaryCreds && !secondaryCreds) {

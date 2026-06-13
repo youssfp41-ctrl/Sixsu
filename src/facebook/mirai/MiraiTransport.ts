@@ -45,11 +45,19 @@ export class MiraiTransport implements ISystem {
   private reconnectTimer:       ReturnType<typeof setTimeout> | null = null;
   private loginAttempts         = 0;
   private listenerStartMs       = 0;
+  private lastConnectedAt:      number | null = null;
+  private lastDisconnectedAt:   number | null = null;
+  private totalReconnects       = 0;
+
+  /** Callback invoked when the transport permanently gives up (AppState expired or max retries). */
+  private onPermanentFailure:   ((reason: string) => void) | null = null;
 
   private static readonly MAX_LOGIN_ATTEMPTS  = 5;
-  /** Max times a FATAL Facebook error triggers a retry before we stop permanently.
-   *  Transient 1357031 errors can be caused by a secondary account logging in from
-   *  the same IP — allow a couple of retries before treating it as genuine expiry. */
+  /**
+   * Max times a FATAL Facebook error triggers a retry before we stop permanently.
+   * Transient 1357031 errors can be caused by a secondary account logging in from
+   * the same IP — allow a couple of retries before treating it as genuine expiry.
+   */
   private static readonly MAX_FATAL_RETRIES   = 2;
   private static readonly STABLE_LISTEN_MS    = 30_000;
   private static readonly BASE_LOGIN_DELAY_MS = 5_000;
@@ -95,6 +103,11 @@ export class MiraiTransport implements ISystem {
     this.rawListeners = this.rawListeners.filter(l => l !== fn);
   }
 
+  /** Called when transport gives up permanently — lets outer code trigger a hard restart. */
+  setOnPermanentFailure(fn: (reason: string) => void): void {
+    this.onPermanentFailure = fn;
+  }
+
   getApi():          FcaApi | null { return this.api; }
   getCurrentUserId(): string       { return this.api?.getCurrentUserID() ?? ""; }
   getAppState():     FcaCookie[]   { return this.api?.getAppState() ?? this.appState; }
@@ -104,6 +117,25 @@ export class MiraiTransport implements ISystem {
 
   /** True while this transport is allowed to (re)connect. */
   isRunning(): boolean { return this.running; }
+
+  /** Diagnostic snapshot: connection uptime, reconnect count, etc. */
+  getStats(): {
+    connected:          boolean;
+    running:            boolean;
+    loginAttempts:      number;
+    totalReconnects:    number;
+    lastConnectedAt:    Date | null;
+    lastDisconnectedAt: Date | null;
+  } {
+    return {
+      connected:          this.isConnected(),
+      running:            this.running,
+      loginAttempts:      this.loginAttempts,
+      totalReconnects:    this.totalReconnects,
+      lastConnectedAt:    this.lastConnectedAt !== null ? new Date(this.lastConnectedAt) : null,
+      lastDisconnectedAt: this.lastDisconnectedAt !== null ? new Date(this.lastDisconnectedAt) : null,
+    };
+  }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -133,9 +165,16 @@ export class MiraiTransport implements ISystem {
    * External restart — resets all retry counters and forces a fresh login attempt.
    * Called by ReconnectManager after it successfully refreshes credentials, bridging
    * the gap between "credentials valid" and "MQTT actually reconnected".
+   *
+   * Also used by the self-healing watchdog to recover from zombie state
+   * (loginAttempts exceeded MAX without setting running=false).
    */
   async restart(): Promise<void> {
-    log.info(`MiraiTransport [${this.name}]: external restart requested — resetting retry counters.`);
+    log.info(
+      `MiraiTransport [${this.name}]: external restart requested — ` +
+      `resetting retry counters. [self-healing]`,
+      { prevAttempts: this.loginAttempts, totalReconnects: this.totalReconnects },
+    );
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.stopListening();
     this.api           = null;
@@ -177,12 +216,14 @@ export class MiraiTransport implements ISystem {
 
           if (isSessionExpiredError(errMsg)) {
             log.error(
-              `MiraiTransport [${this.name}]: AppState expired — stopping retries.`,
+              `MiraiTransport [${this.name}]: AppState expired — stopping retries. [permanent-failure]`,
               { error: errMsg },
             );
             this.running = false;
+            this.lastDisconnectedAt = Date.now();
             resolved = true;
             resolve();
+            this.onPermanentFailure?.("appstate-expired");
             return;
           }
 
@@ -196,7 +237,14 @@ export class MiraiTransport implements ISystem {
         this.api = api;
         api.setOptions({ ...MiraiTransport.FCA_OPTIONS, pageID: api.getCurrentUserID() });
 
-        log.info(`MiraiTransport [${this.name}]: logged in.`, { userId: api.getCurrentUserID() });
+        this.lastConnectedAt = Date.now();
+        this.totalReconnects++;
+
+        log.info(`MiraiTransport [${this.name}]: logged in. [listener-start]`, {
+          userId:          api.getCurrentUserID(),
+          totalReconnects: this.totalReconnects,
+          uptime:          process.uptime(),
+        });
 
         resolved = true;
         this.startListening();
@@ -227,6 +275,8 @@ export class MiraiTransport implements ISystem {
           errMsg = String(err);
         }
 
+        this.lastDisconnectedAt = Date.now();
+
         if (errCode !== undefined && FATAL_FB_ERRORS.has(errCode)) {
           // FATAL Facebook error on the MQTT stream (e.g. 1357031 = session interrupted).
           //
@@ -243,22 +293,26 @@ export class MiraiTransport implements ISystem {
             log.warn(
               `MiraiTransport [${this.name}]: FATAL fb error ${errCode} — ` +
               `scheduling retry (${this.loginAttempts + 1}/${MiraiTransport.MAX_FATAL_RETRIES}). ` +
-              `This may be a transient error caused by multi-account login.`,
+              `This may be a transient error caused by multi-account login. [listener-stop]`,
               { fbErrorCode: errCode },
             );
             this.scheduleReLogin("fatal-fb-error");
           } else {
             log.error(
               `MiraiTransport [${this.name}]: FATAL fb error ${errCode} persists after ` +
-              `${this.loginAttempts} retries — AppState is likely expired. Stopping permanently.`,
+              `${this.loginAttempts} retries — AppState is likely expired. Stopping. [permanent-failure]`,
               { fbErrorCode: errCode },
             );
             this.running = false;
+            this.onPermanentFailure?.(`fatal-fb-error-${errCode}`);
           }
           return;
         }
 
-        log.warn(`MiraiTransport [${this.name}]: listener error — re-login.`, { error: errMsg, stableMs });
+        log.warn(
+          `MiraiTransport [${this.name}]: listener error — scheduling re-login. [listener-stop]`,
+          { error: errMsg, stableMs },
+        );
 
         if (stableMs >= MiraiTransport.STABLE_LISTEN_MS) {
           this.loginAttempts = 0;
@@ -289,13 +343,14 @@ export class MiraiTransport implements ISystem {
       }
     });
 
-    log.info(`MiraiTransport [${this.name}]: listener active.`);
+    log.info(`MiraiTransport [${this.name}]: listener active. [listener-active]`);
   }
 
   private stopListening(): void {
     if (this.stopListenFn) {
       try { this.stopListenFn(); } catch { /**/ }
       this.stopListenFn = null;
+      log.info(`MiraiTransport [${this.name}]: listener stopped. [listener-stopped]`);
     }
   }
 
@@ -305,7 +360,18 @@ export class MiraiTransport implements ISystem {
     this.loginAttempts++;
 
     if (this.loginAttempts > MiraiTransport.MAX_LOGIN_ATTEMPTS) {
-      log.warn(`MiraiTransport [${this.name}]: max login attempts (${MiraiTransport.MAX_LOGIN_ATTEMPTS}) reached — stopped.`);
+      // ── Self-healing: signal permanent failure instead of silently zombifying ──
+      // Previously we just returned here, leaving the transport in a zombie state:
+      // running=true but api=null and no reconnect scheduled.
+      // Now we set running=false and invoke the permanent failure callback so
+      // ReconnectManager can trigger a clean restart via restartHook.
+      log.warn(
+        `MiraiTransport [${this.name}]: max login attempts ` +
+        `(${MiraiTransport.MAX_LOGIN_ATTEMPTS}) reached — signalling failure. [permanent-failure]`,
+        { reason },
+      );
+      this.running = false;
+      this.onPermanentFailure?.("max-login-attempts");
       return;
     }
 

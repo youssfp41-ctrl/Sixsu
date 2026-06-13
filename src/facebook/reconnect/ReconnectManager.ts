@@ -244,16 +244,33 @@ export class ReconnectManager implements ISystem {
       }),
 
       onDisconnected: (accountId) => {
-        log.warn(`[${accountId}] Health monitor detected disconnection.`);
-
         const record = this.records.get(accountId);
-        if (
-          record &&
-          (record.status === ReconnectStatus.RETRYING ||
-           record.status === ReconnectStatus.BLOCKED)
-        ) {
+
+        // If already retrying — skip, don't launch parallel reconnects
+        if (record?.status === ReconnectStatus.RETRYING) {
+          log.debug(`[${accountId}] Health check: already retrying — skip.`);
           return;
         }
+
+        // ── Self-healing: BLOCKED state recovery ──────────────────────────────
+        // If BLOCKED, check whether the guard's block window has expired.
+        // If it has, reset the status to IDLE so we retry.
+        // Without this, a BLOCKED account is NEVER retried by the health monitor.
+        if (record?.status === ReconnectStatus.BLOCKED) {
+          const stillBlocked = this.guard.blockedUntil(accountId) !== null;
+          if (stillBlocked) {
+            log.debug(`[${accountId}] Health check: blocked — waiting for window to expire.`);
+            return;
+          }
+          // Block window expired — reset and allow retry
+          log.info(
+            `[${accountId}] Health check: block window expired — resetting BLOCKED → IDLE ` +
+            `and scheduling reconnect. [self-healing]`
+          );
+          this.setStatus(accountId, ReconnectStatus.IDLE);
+        }
+
+        log.warn(`[${accountId}] Health monitor detected disconnection. Scheduling reconnect.`);
 
         this.reconnect(accountId).catch((err: unknown) => {
           log.error(
