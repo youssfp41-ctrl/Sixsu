@@ -1,3 +1,4 @@
+// deploy: v3.1 — all category fixes loaded
 import fs   from "fs";
 import path from "path";
 import { IPlugin, PluginManifest } from "../../types/IPlugin";
