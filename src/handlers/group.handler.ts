@@ -147,10 +147,6 @@ export async function handleMemberJoined(
       adminIds: config.bot.adminIds,
     });
 
-    await sender.sendText(
-      event.senderId,
-      `مرحباً! أنا Sixsu 🤖\nتم إضافتي بنجاح إلى هذه المجموعة.\nاكتب /help لمعرفة الأوامر المتاحة.`,
-    );
 
     await notifyAdminBotAdded(sender, event.senderId);
     return;
