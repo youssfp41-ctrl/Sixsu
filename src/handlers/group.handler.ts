@@ -59,38 +59,6 @@ function getFcaApi(): IFcaProtectionApi | null {
   return _apiGetter?.() ?? null;
 }
 
-function buildJoinMessage(memberIds: string[], addedByUserId: string): string {
-  if (memberIds.length === 1) {
-    return (
-      `🎉 مرحباً بالعضو الجديد!\n` +
-      `👤 المعرف: ${memberIds[0]}\n` +
-      `➕ تمت الإضافة بواسطة: ${addedByUserId}\n` +
-      `أهلاً وسهلاً في المجموعة! 🌟`
-    );
-  }
-
-  const list = memberIds.map((id) => `• ${id}`).join("\n");
-  return (
-    `🎉 مرحباً بالأعضاء الجدد!\n` +
-    `${list}\n` +
-    `➕ تمت الإضافة بواسطة: ${addedByUserId}\n` +
-    `أهلاً وسهلاً بالجميع! 🌟`
-  );
-}
-
-function buildLeaveMessage(memberIds: string[], removedBySelf: boolean): string {
-  if (memberIds.length === 1) {
-    return removedBySelf
-      ? `👋 ${memberIds[0]} غادر المجموعة. نتمنى له التوفيق!`
-      : `🚪 تم إزالة ${memberIds[0]} من المجموعة.`;
-  }
-
-  const list = memberIds.map((id) => `• ${id}`).join("\n");
-  return removedBySelf
-    ? `👋 غادر المجموعة عدة أعضاء:\n${list}`
-    : `🚪 تم إزالة عدة أعضاء من المجموعة:\n${list}`;
-}
-
 async function notifyAdminBotAdded(
   sender:   ISender,
   threadId: string,
@@ -151,19 +119,16 @@ export async function handleMemberJoined(
       threadId: event.senderId,
       adminIds: config.bot.adminIds,
     });
-
-
     await notifyAdminBotAdded(sender, event.senderId);
-    return;
   }
 
-  const text = buildJoinMessage(event.members, event.addedByUserId);
-  await sender.sendText(event.senderId, text);
+  // Welcome messages disabled — sending to every join causes high spam rate
+  // and risks account suspension. Logs above are kept for diagnostics.
 }
 
 export async function handleMemberLeft(
   event:          FBMemberLeftEvent,
-  senderOverride?: ISender,
+  _senderOverride?: ISender,
 ): Promise<void> {
   if (event.members.length === 0) {
     log.debug("member_left event with empty members list — skipping.", {
@@ -177,11 +142,8 @@ export async function handleMemberLeft(
     members:  event.members,
   });
 
-  const sender        = resolveSender(senderOverride);
-  const removedBySelf = event.members.length === 1 && event.members[0] === event.senderId;
-  const text          = buildLeaveMessage(event.members, removedBySelf);
-
-  await sender.sendText(event.senderId, text);
+  // Leave messages disabled — sending on every leave/removal causes high spam
+  // rate and risks account suspension. Logs above are kept for diagnostics.
 }
 
 // ── Protection handlers ────────────────────────────────────────────────────
