@@ -36,6 +36,7 @@ import { FacebookClient }                    from "./facebook/FacebookClient";
 import { CookieHttpClient }                  from "./facebook/cookie/CookieHttpClient";
 import { MiraiTransport }                    from "./facebook/mirai/MiraiTransport";
 import { MiraiSender }                       from "./facebook/mirai/MiraiSender";
+import { HumanBehaviorSender }               from "./facebook/HumanBehaviorSender";
 import { FcaEventAdapter }                   from "./facebook/mirai/FcaEventAdapter";
 import { ISender }                           from "./facebook/types/ISender";
 import { FacebookEventNormalizer }           from "./facebook/FacebookEventNormalizer";
@@ -128,7 +129,7 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
 
   // Pass startupDelayMs so secondary accounts stagger their login attempts.
   const transport    = new MiraiTransport(credentials.appState, systemName, startupDelayMs);
-  const sender: ISender = new MiraiSender(transport);
+  const sender: ISender = new HumanBehaviorSender(new MiraiSender(transport));
 
   log.info(`Account [${label}]: transport created.`, { botUserId, systemName, startupDelayMs });
 
@@ -419,7 +420,7 @@ async function bootstrap(): Promise<void> {
         sendTyping:   async () => {},
         sendReaction: async () => {},
       };
-      setGroupSender(noOp);
+      setGroupSender(new HumanBehaviorSender(noOp));
     }
   }
 
@@ -440,7 +441,7 @@ async function bootstrap(): Promise<void> {
 
   if (transports[0]) {
     svcReg.provide("mirai-transport",  transports[0].transport, "core");
-    const primarySender = new MiraiSender(transports[0].transport);
+    const primarySender = new HumanBehaviorSender(new MiraiSender(transports[0].transport));
     svcReg.provide("facebook-sender", primarySender,            "core");
   }
   if (transports[1]) {
@@ -488,7 +489,7 @@ async function bootstrap(): Promise<void> {
     const conn    = new FacebookConnection();
     const gateway = new FacebookGateway(
       conn,
-      new MiraiSender(transports[0].transport),
+      new HumanBehaviorSender(new MiraiSender(transports[0].transport)),
       new FacebookEventNormalizer()
     );
     gateway.getContextBuilder().setOwnerIds(config.bot.ownerIds);
