@@ -31,7 +31,7 @@ export class GroupSettingsRepository {
           $set:         { ...data, updatedAt: new Date() },
           $setOnInsert: { threadId },
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: "after" }
       ).exec();
       log.debug("GroupSettings upserted.", { threadId });
       return doc!;
