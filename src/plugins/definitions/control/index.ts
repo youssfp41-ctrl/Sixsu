@@ -35,30 +35,43 @@ interface IFcaControl {
     limit:     number,
     timestamp: number | null,
     tags:      string[],
-    cb:        (err: Error | null, list: QThread[]) => void,
+    cb:        (err: unknown, list: QThread[]) => void,
   ): void;
   getThreadInfo(
     threadID: string,
-    cb:       (err: Error | null, info: ThreadInfo) => void,
+    cb:       (err: unknown, info: ThreadInfo) => void,
   ): void;
   setTitle(
     title:    string,
     threadID: string,
-    cb:       (err: Error | null) => void,
+    cb:       (err: unknown) => void,
   ): void;
   sendMessage(
     msg:      { body: string },
     threadID: string,
-    cb?:      (err: Error | null) => void,
+    cb?:      (err: unknown) => void,
   ): void;
   removeUserFromGroup(
     userID:   string,
     threadID: string,
-    cb?:      (err: Error | null) => void,
+    cb?:      (err: unknown) => void,
   ): void;
 }
 
 interface IMiraiControl { getApi(): IFcaControl | null; }
+
+// ─── Error helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Serialize any value thrown by fca-unofficial into a human-readable string.
+ * FCA often rejects with a plain object like { error: 1357004, ... } rather
+ * than a proper Error instance, so String(err) yields "[object Object]".
+ */
+function serializeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try { return JSON.stringify(err); } catch { return String(err); }
+}
 
 // ─── GroupCache ───────────────────────────────────────────────────────────────
 
@@ -71,19 +84,41 @@ interface GroupEntry {
 class GroupCache {
   private _groups:     GroupEntry[] = [];
   private _refreshedAt = 0;
+  private _lastError:  string | null = null;
   readonly TTL_MS      = 60_000;
 
   get groups():      GroupEntry[] { return this._groups; }
   get refreshedAt(): number       { return this._refreshedAt; }
   get ageSeconds():  number       { return Math.round((Date.now() - this._refreshedAt) / 1000); }
   get stale():       boolean      { return Date.now() - this._refreshedAt > this.TTL_MS; }
+  get lastError():   string | null { return this._lastError; }
 
+  /**
+   * Fetch the thread list from FCA.
+   * Tries ["INBOX"] first; falls back to [] if that call returns an error
+   * (some account types / FCA versions reject the INBOX tag).
+   */
   async refresh(api: IFcaControl): Promise<void> {
-    const threads = await new Promise<QThread[]>((resolve, reject) => {
-      api.getThreadList(100, null, ["INBOX"], (err, list) => {
-        if (err) reject(err); else resolve(list ?? []);
+    const fetchThreads = (tags: string[]): Promise<QThread[]> =>
+      new Promise<QThread[]>((resolve, reject) => {
+        api.getThreadList(100, null, tags, (err, list) => {
+          if (err) reject(err); else resolve(list ?? []);
+        });
       });
-    });
+
+    let threads: QThread[];
+    try {
+      threads = await fetchThreads(["INBOX"]);
+    } catch (firstErr) {
+      // Fallback: try without tag filter — works on some account types
+      try {
+        threads = await fetchThreads([]);
+      } catch (secondErr) {
+        // Both attempts failed — propagate the second error (more informative)
+        this._lastError = serializeError(secondErr);
+        throw secondErr;
+      }
+    }
 
     this._groups = threads
       .filter(t => t.isGroup)
@@ -94,6 +129,7 @@ class GroupCache {
       }));
 
     this._refreshedAt = Date.now();
+    this._lastError   = null;
   }
 
   getByIndex(n: number): GroupEntry | undefined { return this._groups[n - 1]; }
@@ -127,7 +163,7 @@ async function ensureFresh(cache: GroupCache, api: IFcaControl, pCtx: IPluginCon
     pCtx.logger.info("ControlPlugin: cache refreshed.", { count: cache.groups.length });
     return true;
   } catch (err) {
-    pCtx.logger.warn("ControlPlugin: cache refresh failed.", { error: String(err) });
+    pCtx.logger.warn("ControlPlugin: cache refresh failed.", { error: serializeError(err) });
     return false;
   }
 }
@@ -156,7 +192,22 @@ async function handleList(ctx: Context, pCtx: IPluginContext, cache: GroupCache)
   if (!api) { await ctx.reply("⚠️ خدمة Facebook غير متاحة."); return; }
 
   const refreshed = await ensureFresh(cache, api, pCtx);
-  const groups    = cache.groups;
+
+  // If refresh failed AND cache is completely empty, show the actual error
+  // instead of the misleading "البوت ليس في أي قروب" message.
+  if (!refreshed && cache.groups.length === 0) {
+    const errDetail = cache.lastError ?? "خطأ غير معروف";
+    await ctx.reply([
+      HEADER, "",
+      "⚠️ تعذّر جلب قائمة القروبات من Facebook.",
+      `⌯ السبب: ${errDetail}`,
+      "",
+      "⌯ حاول مجدداً بعد لحظات أو أعد تشغيل البوت.",
+    ].join("\n"));
+    return;
+  }
+
+  const groups = cache.groups;
 
   if (groups.length === 0) {
     await ctx.reply(`${HEADER}\n\n⌯ البوت ليس في أي قروب حالياً.`);
@@ -226,7 +277,7 @@ async function handleSendMessage(ctx: Context, pCtx: IPluginContext, cache: Grou
     pCtx.logger.info("ControlPlugin: message sent.", { to: entry.threadID, name: entry.name, by: ctx.user.id });
     await ctx.reply(`✅ تم إرسال الرسالة إلى «${entry.name}».`);
   } catch (err) {
-    pCtx.logger.warn("ControlPlugin: sendMessage failed.", { error: String(err) });
+    pCtx.logger.warn("ControlPlugin: sendMessage failed.", { error: serializeError(err) });
     await ctx.reply("⚠️ فشل إرسال الرسالة.");
   }
 }
@@ -248,7 +299,7 @@ async function handleLeave(ctx: Context, pCtx: IPluginContext, cache: GroupCache
     pCtx.logger.info("ControlPlugin: left group.", { threadID: entry.threadID, name, by: ctx.user.id });
     await ctx.reply(`✅ غادر البوت القروب «${name}» بنجاح.`);
   } catch (err) {
-    pCtx.logger.warn("ControlPlugin: leaveGroup failed.", { error: String(err) });
+    pCtx.logger.warn("ControlPlugin: leaveGroup failed.", { error: serializeError(err) });
     await ctx.reply(`⚠️ فشل مغادرة القروب. تأكد أن البوت ليس المالك الوحيد.`);
   }
 }
@@ -269,7 +320,7 @@ async function handleRename(ctx: Context, pCtx: IPluginContext, cache: GroupCach
     pCtx.logger.info("ControlPlugin: renamed.", { threadID: entry.threadID, from: oldName, to: newName, by: ctx.user.id });
     await ctx.reply(`${HEADER}\n\n✅ تم تغيير اسم القروب:\n«${oldName}» ← «${newName}»`);
   } catch (err) {
-    pCtx.logger.warn("ControlPlugin: setTitle failed.", { error: String(err) });
+    pCtx.logger.warn("ControlPlugin: setTitle failed.", { error: serializeError(err) });
     await ctx.reply("⚠️ فشل تغيير الاسم. تأكد أن البوت أدمن في القروب.");
   }
 }
@@ -312,7 +363,7 @@ async function handleUnmute(ctx: Context, pCtx: IPluginContext, cache: GroupCach
 class ControlPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "control",
-    version:     "1.0.0",
+    version:     "1.1.0",
     description: "لوحة تحكم مركزية لإدارة جميع القروبات عن بُعد.",
     author:      "Sixseven-6677",
   };
@@ -343,7 +394,7 @@ class ControlPlugin implements IPlugin {
             muted:  getMutedThreads().size,
           });
         } catch (err) {
-          pCtx.logger.warn("ControlPlugin: scheduled refresh failed.", { error: String(err) });
+          pCtx.logger.warn("ControlPlugin: scheduled refresh failed.", { error: serializeError(err) });
         }
       },
     });
