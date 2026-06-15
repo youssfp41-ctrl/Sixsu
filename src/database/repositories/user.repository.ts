@@ -32,6 +32,8 @@ export class UserRepository extends BaseRepository<
    * Specifying the same path in both $setOnInsert and $inc in the same update
    * causes a MongoDB "Conflicting update operators" error (MongoServerError code 40).
    * The schema default of 0 handles the initial value; $inc brings it to 1.
+   *
+   * NOTE: `new` option is deprecated in Mongoose v9 — use `returnDocument: 'after'` instead.
    */
   async trackActivity(
     fbId:  string,
@@ -47,13 +49,19 @@ export class UserRepository extends BaseRepository<
           $set:         { lastSeenAt: new Date(), ...nameSet },
           $inc:         { messageCount: 1 },
         },
-        { upsert: true, new: true, rawResult: true, runValidators: true }
+        { upsert: true, returnDocument: "after", rawResult: true, runValidators: true }
       ).exec();
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const isNew = (raw as any).lastErrorObject?.updatedExisting === false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return { doc: (raw as any).value as UserDocument, isNew };
+      const doc = (raw as any).value as UserDocument | null;
+
+      if (!doc) {
+        throw new Error(`findOneAndUpdate returned no document for fbId=${fbId}`);
+      }
+
+      return { doc, isNew };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`[UserRepository.trackActivity] ${msg}`);
@@ -71,7 +79,7 @@ export class UserRepository extends BaseRepository<
           $set:         { ...data, lastSeenAt: new Date() },
           $setOnInsert: { fbId },
         },
-        { upsert: true, new: true, runValidators: true }
+        { upsert: true, returnDocument: "after", runValidators: true }
       ).exec();
       return doc!;
     } catch (err) {
