@@ -14,13 +14,20 @@ export interface CooldownOptions {
 }
 
 export function createCooldownMiddleware(opts: CooldownOptions): IMiddleware {
-  /** key = "userId:commandName" → last execution timestamp */
+  /**
+   * key = "botId:userId:commandName" → last execution timestamp
+   *
+   * botId  = ctx.thread.pageId (the bot account's Facebook user ID).
+   * Including botId isolates each account's cooldown so that when two
+   * bot accounts are in the same group, executing a command on account A
+   * does NOT trigger the "please wait" message on account B for the same user.
+   */
   const store = new Map<string, number>();
   const CLEANUP_AT = 2_000;
 
   return {
     name:        "cooldown",
-    description: `Global ${opts.durationMs}ms cooldown (per-command override via ICommand.cooldownMs)`,
+    description: `Global ${opts.durationMs}ms cooldown (per-account, per-command override via ICommand.cooldownMs)`,
     handle: async (ctx, command, next) => {
       if (!command) {
         await next();
@@ -29,7 +36,11 @@ export function createCooldownMiddleware(opts: CooldownOptions): IMiddleware {
 
       // Per-command override takes priority over global option
       const duration = command.cooldownMs ?? opts.durationMs;
-      const key      = `${ctx.user.id}:${command.name}`;
+
+      // Scope key to the bot account (pageId) so primary and secondary
+      // accounts maintain independent cooldown stores.
+      const botId    = ctx.thread.pageId || "default";
+      const key      = `${botId}:${ctx.user.id}:${command.name}`;
       const now      = Date.now();
       const lastUsed = store.get(key) ?? 0;
       const remaining = duration - (now - lastUsed);
@@ -38,7 +49,7 @@ export function createCooldownMiddleware(opts: CooldownOptions): IMiddleware {
         const seconds = Math.ceil(remaining / 1000);
 
         log.debug(
-          `Cooldown active for user ${ctx.user.id} on command "${command.name}" — ` +
+          `Cooldown active for user ${ctx.user.id} on command "${command.name}" (bot: ${botId}) — ` +
           `${seconds}s remaining.`
         );
 
@@ -66,3 +77,4 @@ export function createCooldownMiddleware(opts: CooldownOptions): IMiddleware {
     },
   };
 }
+
