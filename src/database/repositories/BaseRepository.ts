@@ -53,7 +53,7 @@ export abstract class BaseRepository<
     try {
       return await this.model
         .findByIdAndUpdate(id, { $set: data } as UpdateQuery<T>, {
-          new: true,
+          returnDocument: "after",
           runValidators: true,
         })
         .exec();
