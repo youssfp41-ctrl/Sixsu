@@ -75,6 +75,39 @@ function getThread(store: StoreData, threadId: string): ThreadConfig {
   return store.threads[threadId]!;
 }
 
+// ─── Raw-text helper ──────────────────────────────────────────────────────────
+
+/**
+ * Extracts the body of a command message while preserving ALL internal
+ * whitespace (multi-spaces, tabs, newlines).
+ *
+ * ctx.args is tokenised on /\s+/, so ctx.args.slice(n).join(" ") destroys
+ * every extra space and every newline the user typed.
+ *
+ * This function works directly on the raw message string: strips exactly
+ * `n` leading whitespace-delimited tokens (command name + subcommand words),
+ * then removes only the single separator between the last token and the body —
+ * leaving all internal whitespace completely intact.
+ *
+ * @param rawText   The full raw message text (ctx.message.text).
+ * @param n         Number of leading tokens to strip (commandName + subcommand = 2).
+ *
+ * Examples with n=2:
+ *   "بلاك رسالة كلمة1   كلمة2"   => "كلمة1   كلمة2"
+ *   "black msg line1\nline2"       => "line1\nline2"
+ *   "blk message a  b\n  c"        => "a  b\n  c"
+ */
+function rawBodyAfterArgs(rawText: string, n: number): string {
+  let s = rawText;
+  for (let i = 0; i < n; i++) {
+    // strip leading whitespace + next non-whitespace token
+    s = s.replace(/^\s*\S+/, "");
+  }
+  // trim ONLY the immediate space/tab separator (NOT newlines, which the user
+  // may have intentionally placed at the start of their message body)
+  return s.replace(/^[ \t]+/, "");
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ𝐁᮫͎ܺ݀ࣸ᷼᷍⃢ː𝚶̶݄݈݊𝐓݂ ❈ 🦢";
@@ -84,7 +117,7 @@ const HEADER = "⸪⟅𝐕̶݈̂͜𝔈̟͢⃟݃།̶𝝬̶۪͛ۡ⸸𝚬̱̩⩨ܵ
 class BlackPlugin implements IPlugin {
   readonly manifest: PluginManifest = {
     name:        "black",
-    version:     "2.0.0",
+    version:     "2.1.0",
     description: "إرسال رسالة تلقائية متكررة داخل القروب بفاصل زمني يحدده الأدمن. يحفظ في MongoDB.",
     author:      "Sixseven-6677",
   };
@@ -131,11 +164,9 @@ class BlackPlugin implements IPlugin {
   async onEnable(): Promise<void> {
     const pCtx = this.ctx;
 
-    // Register command
     pCtx.registerCommand(this.buildCommand(pCtx));
     pCtx.logger.info("Command \"بلاك\" registered (aliases: black, blk). Category: automation.");
 
-    // Restore active timers from persisted state
     for (const [threadId, config] of Object.entries(this.store.threads)) {
       if (config.active && config.message && config.intervalSec > 0) {
         this.startTimer(pCtx, threadId);
@@ -148,7 +179,6 @@ class BlackPlugin implements IPlugin {
   }
 
   async onDisable(): Promise<void> {
-    // Stop all running timers
     for (const [threadId, disposable] of this.activeTimers) {
       disposable.dispose();
       this.ctx.logger.debug("Black: timer stopped on disable.", { threadId });
@@ -180,7 +210,6 @@ class BlackPlugin implements IPlugin {
           threadId,
           error: err instanceof Error ? err.message : String(err),
         });
-        // File fallback on MongoDB failure
         saveStoreFile(this.store);
       });
     } else {
@@ -212,7 +241,7 @@ class BlackPlugin implements IPlugin {
   // ── Timer helpers ─────────────────────────────────────────────────────────
 
   private startTimer(pCtx: IPluginContext, threadId: string): void {
-    if (this.activeTimers.has(threadId)) return; // Already running — no duplicates
+    if (this.activeTimers.has(threadId)) return;
 
     const store  = this.store;
     const plugin = this;
@@ -234,7 +263,6 @@ class BlackPlugin implements IPlugin {
         try {
           await sender.sendText(threadId, cfg.message);
           cfg.lastSentAt = new Date().toISOString();
-          // Save only the lastSentAt update — fire-and-forget
           if (plugin.repo) {
             plugin.repo.upsert(threadId, { lastSentAt: new Date() }).catch((err: unknown) => {
               pCtx.logger.warn("Black: MongoDB lastSentAt update failed.", {
@@ -411,8 +439,15 @@ class BlackPlugin implements IPlugin {
   private async handleSetMessage(ctx: Context, pCtx: IPluginContext): Promise<void> {
     await ctx.typingOn();
 
-    // args: [0]="رسالة", [1..] = message text
-    const newMessage = ctx.args.slice(1).join(" ").trim();
+    // ── Preserve ALL whitespace in the user's message ──────────────────────
+    //
+    // ctx.args is tokenised on /\s+/, so ctx.args.slice(1).join(" ") would
+    // collapse every multi-space run and strip every newline the user typed.
+    //
+    // rawBodyAfterArgs(text, 2) strips only the first 2 tokens (commandName
+    // + subcommand "رسالة"/"msg"/"message") from the raw string, then trims
+    // only the single space/tab separator — leaving the rest 100% intact.
+    const newMessage = rawBodyAfterArgs(ctx.message.text ?? "", 2);
 
     if (!newMessage) {
       await ctx.reply([
@@ -452,7 +487,6 @@ class BlackPlugin implements IPlugin {
   private async handleSetInterval(ctx: Context, pCtx: IPluginContext): Promise<void> {
     await ctx.typingOn();
 
-    // args: [0]="وقت", [1] = seconds
     const raw     = ctx.getArg(1);
     const seconds = parseInt(raw ?? "", 10);
 
@@ -472,7 +506,6 @@ class BlackPlugin implements IPlugin {
     config.intervalSec = seconds;
     this.saveThread(ctx.thread.id);
 
-    // If timer was running, restart it with the new interval
     if (wasRunning) {
       this.stopTimer(ctx.thread.id);
       this.startTimer(pCtx, ctx.thread.id);
@@ -512,7 +545,7 @@ class BlackPlugin implements IPlugin {
       return;
     }
 
-    const running    = this.activeTimers.has(ctx.thread.id);
+    const running     = this.activeTimers.has(ctx.thread.id);
     const statusEmoji = running ? "🟢 مفعّل" : "🔴 غير مفعّل";
 
     const msgPreview = config.message
@@ -565,4 +598,3 @@ class BlackPlugin implements IPlugin {
 }
 
 export default new BlackPlugin();
-
