@@ -1,8 +1,8 @@
-import { UserModel, UserDocument, IUser } from "../models/user.model";
-import { BaseRepository }                   from "./BaseRepository";
+import { UserModel, UserDocument, IUser } from '../models/user.model';
+import { BaseRepository }                   from './BaseRepository';
 
-export type CreateUserDTO = Pick<IUser, "fbId"> & Partial<Omit<IUser, "fbId">>;
-export type UpdateUserDTO = Partial<Omit<IUser, "fbId">>;
+export type CreateUserDTO = Pick<IUser, 'fbId'> & Partial<Omit<IUser, 'fbId'>>;
+export type UpdateUserDTO = Partial<Omit<IUser, 'fbId'>>;
 
 export interface TrackActivityResult {
   doc:   UserDocument;
@@ -23,17 +23,14 @@ export class UserRepository extends BaseRepository<
   }
 
   /**
-   * Atomically upserts the user record on every incoming message:
-   *   - Creates the document on first seen (role "user", messageCount defaults to 0 via schema).
-   *   - Updates lastSeenAt and name (when provided) on every call.
-   *   - Increments messageCount by 1 atomically via $inc.
+   * Atomically upserts the user record on every incoming message.
    *
-   * NOTE: messageCount is intentionally NOT in $setOnInsert.
-   * Specifying the same path in both $setOnInsert and $inc in the same update
-   * causes a MongoDB "Conflicting update operators" error (MongoServerError code 40).
-   * The schema default of 0 handles the initial value; $inc brings it to 1.
-   *
-   * NOTE: `new` option is deprecated in Mongoose v9 — use `returnDocument: 'after'` instead.
+   * NOTE: rawResult is intentionally NOT used.
+   * In Mongoose v9 with upsert:true, rawResult.value returns null for new inserts
+   * even with returnDocument:'after' — known Mongoose v8/v9 behaviour.
+   * Without rawResult, findOneAndUpdate returns the document directly (always
+   * non-null after a successful upsert with returnDocument:'after').
+   * isNew is inferred from messageCount === 1 (schema default 0 + first $inc = 1).
    */
   async trackActivity(
     fbId:  string,
@@ -42,25 +39,21 @@ export class UserRepository extends BaseRepository<
     try {
       const nameSet = name ? { name } : {};
 
-      const raw = await UserModel.findOneAndUpdate(
+      const doc = await UserModel.findOneAndUpdate(
         { fbId },
         {
-          $setOnInsert: { fbId, role: "user", preferences: {} },
+          $setOnInsert: { fbId, role: 'user', preferences: {} },
           $set:         { lastSeenAt: new Date(), ...nameSet },
           $inc:         { messageCount: 1 },
         },
-        { upsert: true, returnDocument: "after", rawResult: true, runValidators: true }
+        { upsert: true, returnDocument: 'after', runValidators: true }
       ).exec();
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const isNew = (raw as any).lastErrorObject?.updatedExisting === false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const doc = (raw as any).value as UserDocument | null;
 
       if (!doc) {
         throw new Error(`findOneAndUpdate returned no document for fbId=${fbId}`);
       }
 
+      const isNew = doc.messageCount === 1;
       return { doc, isNew };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -79,7 +72,7 @@ export class UserRepository extends BaseRepository<
           $set:         { ...data, lastSeenAt: new Date() },
           $setOnInsert: { fbId },
         },
-        { upsert: true, returnDocument: "after", runValidators: true }
+        { upsert: true, returnDocument: 'after', runValidators: true }
       ).exec();
       return doc!;
     } catch (err) {
@@ -128,7 +121,7 @@ export class UserRepository extends BaseRepository<
     }
   }
 
-  async setRole(fbId: string, role: IUser["role"]): Promise<boolean> {
+  async setRole(fbId: string, role: IUser['role']): Promise<boolean> {
     try {
       const result = await UserModel.updateOne(
         { fbId },
