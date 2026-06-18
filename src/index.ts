@@ -151,9 +151,12 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
 
   const adapter = new FcaEventAdapter(botUserId);
 
-  // Capture the account-specific sender in a closure so group events (member
-  // joined/left) are sent through the correct account, not always primary.
-  const accountSender = sender;
+  // Capture the account-specific sender and API getter in closures so group
+  // events (member joined/left, name/nickname changes) are processed through
+  // the correct account rather than always falling back to the primary account.
+  const accountSender    = sender;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const accountApiGetter = (): any => transport.getApi();
 
   transport.setEventHandler((fcaEvent) => {
     const entries = adapter.adapt(fcaEvent);
@@ -173,8 +176,11 @@ function bootFcaAccount(opts: AccountSetupOptions): MiraiTransport {
           // are delivered via the secondary account, not via primary.
           onMemberJoined:    (evt) => handleMemberJoined(evt, accountSender),
           onMemberLeft:      (evt) => handleMemberLeft(evt, accountSender),
-          onNameChanged:     handleNameChanged,
-          onNicknameChanged: handleNicknameChanged,
+          // Pass per-account API getter so name/nickname protection reverts
+          // (setTitle / changeNickname) are executed through the account that
+          // actually received the event — not always the primary account.
+          onNameChanged:     (evt) => handleNameChanged(evt, accountApiGetter),
+          onNicknameChanged: (evt) => handleNicknameChanged(evt, accountApiGetter),
         },
       );
     }
