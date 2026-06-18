@@ -2,7 +2,10 @@
 nixPkgs = ["nodejs_20", "yt-dlp", "ffmpeg"]
 
 [phases.install]
-cmds = ["npm install --no-audit"]
+cmds = ["npm install -g pnpm", "pnpm install --no-frozen-lockfile"]
+
+[phases.build]
+cmds = ["pnpm run build"]
 
 [start]
 cmd = "node dist/index.js"
