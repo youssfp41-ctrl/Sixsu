@@ -151,6 +151,11 @@ export async function handleMemberLeft(
 /**
  * Handles the FCA name-changed event.
  *
+ * @param apiGetterOverride  Per-account API getter injected by bootFcaAccount.
+ *   When provided, protection actions (setTitle) are executed through the
+ *   account that actually received the event, not the global primary account.
+ *   Falls back to the global _apiGetter when omitted (e.g. webhook route).
+ *
  * Lifecycle logs emitted (searchable markers):
  *   [name-event-received]   — event arrived at handler
  *   [name-protection-skip]  — protection off, bot-initiated, or same name
@@ -159,7 +164,11 @@ export async function handleMemberLeft(
  *   [name-revert-success]   — setTitle succeeded
  *   [name-revert-fail]      — setTitle failed (FB error)
  */
-export async function handleNameChanged(event: FBNameChangedEvent): Promise<void> {
+export async function handleNameChanged(
+  event: FBNameChangedEvent,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  apiGetterOverride?: () => any,
+): Promise<void> {
   const store = getProtectionStore();
   const state = store.threads[event.threadId];
 
@@ -191,7 +200,9 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
     return;
   }
 
-  const api = getFcaApi();
+  // Use the per-account getter when provided (secondary account protection fix),
+  // otherwise fall back to the global primary account getter.
+  const api = (apiGetterOverride ? apiGetterOverride() : getFcaApi()) as IFcaProtectionApi | null;
   if (!api) {
     log.warn(
       "GroupHandler: name_changed — protection active but FCA API unavailable (mid-reconnect?). [name-api-unavailable]",
@@ -257,9 +268,16 @@ export async function handleNameChanged(event: FBNameChangedEvent): Promise<void
   });
 }
 
-export async function handleNicknameChanged(event: FBNicknameChangedEvent): Promise<void> {
+export async function handleNicknameChanged(
+  event: FBNicknameChangedEvent,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  apiGetterOverride?: () => any,
+): Promise<void> {
   const store = getProtectionStore();
-  const api   = getFcaApi();
+
+  // Use the per-account getter when provided (secondary account protection fix),
+  // otherwise fall back to the global primary account getter.
+  const api = (apiGetterOverride ? apiGetterOverride() : getFcaApi()) as IFcaProtectionApi | null;
 
   if (!api) {
     log.warn("GroupHandler: nickname_changed — FCA API unavailable (mid-reconnect?). [name-api-unavailable]", {
