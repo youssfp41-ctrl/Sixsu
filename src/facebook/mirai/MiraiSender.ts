@@ -58,18 +58,43 @@ export class MiraiSender implements ISender {
     });
   }
 
-  /** Send a typing indicator (best-effort, never throws). */
+  /**
+   * Send a typing indicator (best-effort, never throws).
+   *
+   * Wrapped in a Promise so the caller awaits the HTTP request completion
+   * before starting any delay — ensuring the '...' indicator is actually
+   * visible on Facebook before the message arrives.
+   *
+   * Previously called without a callback (fire-and-forget), which caused
+   * the typing indicator HTTP request and the message HTTP request to race
+   * each other, sometimes arriving simultaneously on the client side.
+   */
   async sendTyping(recipientId: string): Promise<void> {
     const api = this.transport.getApi();
     if (!api) return;
 
     log.debug("MiraiSender: sending typing indicator.", { to: recipientId });
 
-    try {
-      api.sendTypingIndicator(recipientId);
-    } catch {
-      // Typing indicators are best-effort — never propagate errors.
-    }
+    return new Promise<void>((resolve) => {
+      try {
+        api.sendTypingIndicator(recipientId, (err?: Error) => {
+          if (err) {
+            log.warn("MiraiSender.sendTyping: indicator failed.", {
+              to:    recipientId,
+              error: err.message,
+            });
+          }
+          resolve();
+        });
+      } catch (e: unknown) {
+        // sendTypingIndicator is best-effort — log and continue, never block.
+        log.warn("MiraiSender.sendTyping: threw.", {
+          to:    recipientId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        resolve();
+      }
+    });
   }
 
   /** Add an emoji reaction to a message (best-effort, never throws). */
