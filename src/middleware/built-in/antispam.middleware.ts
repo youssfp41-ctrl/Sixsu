@@ -28,13 +28,20 @@ export function createAntiSpamMiddleware(opts: AntiSpamOptions): IMiddleware {
     description: `Max ${opts.maxMessages} msgs per ${opts.windowMs}ms`,
     handle: async (ctx, _command, next) => {
       const userId = ctx.user.id;
+      // Scope the sliding window to the bot account that received the message.
+      // Without botId isolation, messages sent to account A and account B by
+      // the same user accumulate in a single shared counter — causing false
+      // spam blocks when running two accounts from the same process.
+      // Uses ctx.thread.pageId (the recipient bot's FB userId) as the scope key.
+      const botId  = ctx.thread.pageId || "default";
+      const key    = `${botId}:${userId}`;
       const now    = Date.now();
 
       // Retrieve or create the sliding-window record
-      let record = store.get(userId);
+      let record = store.get(key);
       if (!record) {
         record = { timestamps: [] };
-        store.set(userId, record);
+        store.set(key, record);
       }
 
       // Prune timestamps outside the window
@@ -48,7 +55,7 @@ export function createAntiSpamMiddleware(opts: AntiSpamOptions): IMiddleware {
         const resetInSec = Math.ceil(resetInMs / 1000);
 
         log.warn(
-          `AntiSpam blocked user ${userId} — ` +
+          `AntiSpam blocked user ${userId} (bot: ${botId}) — ` +
           `${record.timestamps.length}/${opts.maxMessages} msgs in ${opts.windowMs}ms. ` +
           `Reset in ${resetInSec}s.`
         );
@@ -68,10 +75,10 @@ export function createAntiSpamMiddleware(opts: AntiSpamOptions): IMiddleware {
 
       // Periodic cleanup to prevent memory bloat
       if (store.size > CLEANUP_AT) {
-        for (const [uid, rec] of store) {
+        for (const [k, rec] of store) {
           const active = rec.timestamps.filter((t) => now - t < opts.windowMs);
           if (active.length === 0) {
-            store.delete(uid);
+            store.delete(k);
           } else {
             rec.timestamps = active;
           }
