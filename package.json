@@ -4,7 +4,7 @@
   "private": true,
   "main": "dist/index.js",
   "scripts": {
-    "postinstall": "node scripts/patch-fca.js",
+    "postinstall": "node scripts/patch-fca.js || true",
     "dev": "node scripts/patch-fca.js && export NODE_ENV=development && npx ts-node -r tsconfig-paths/register src/index.ts",
     "build": "node scripts/patch-fca.js && npx --yes tsc -p tsconfig.json",
     "start": "node dist/index.js",
