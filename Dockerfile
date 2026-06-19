@@ -7,8 +7,9 @@ RUN apk add --no-cache python3 ffmpeg curl bash \
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files and scripts (needed for postinstall)
 COPY package.json ./
+COPY scripts/ ./scripts/
 
 # Install ALL dependencies (including devDependencies for build)
 RUN npm install --no-audit
