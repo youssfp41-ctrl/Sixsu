@@ -36,7 +36,7 @@ export const config = {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
-    ownerIds:    optionalEnv("BOT_OWNER_IDS", "61589140635720")
+    ownerIds:    optionalEnv("BOT_OWNER_IDS", "61589140635720,61591396880544")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
